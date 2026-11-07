@@ -1,0 +1,198 @@
+<template>
+	<view class="page">
+		<view class="header">
+			<text class="hello">{{greeting}}</text>
+			<text class="sub">已授权的应用会自动出现在这里</text>
+		</view>
+
+		<view class="grid" v-if="apps.length > 0">
+			<view class="app" v-for="(app, index) in apps" :key="app.code" @click="openApp(app)">
+				<view class="app-icon" :style="'background-color:' + app.bgColor">
+					<text class="app-icon-text" :style="'color:' + app.fgColor">{{app.shortName}}</text>
+				</view>
+				<text class="app-name">{{app.appName}}</text>
+			</view>
+		</view>
+
+		<view class="empty" v-if="!loading && apps.length == 0">
+			<text class="empty-text">{{errorMsg == '' ? '暂无可用应用，请联系管理员授权' : errorMsg}}</text>
+		</view>
+
+		<view class="loading" v-if="loading">
+			<text class="loading-text">加载中…</text>
+		</view>
+	</view>
+</template>
+
+<script setup lang="uts">
+import { http, API_APP_LIST } from '@/utils/http.uts'
+import { getUserInfo, isLoggedIn } from '@/utils/store.uts'
+
+type AppItem = {
+  id: string
+  code: string
+  appName: string
+  shortName: string
+  bgColor: string
+  fgColor: string
+}
+
+const apps = ref<AppItem[]>([])
+const loading = ref(false)
+const errorMsg = ref('')
+const greeting = ref('工作台')
+
+function colorOf(code: string): string[] {
+  if (code == 'campus') {
+    return ['#ea580c', '#fff7ed']
+  }
+  if (code == 'SYSTEM') {
+    return ['#0e7490', '#ecfeff']
+  }
+  if (code == 'PLATFORM') {
+    return ['#7c3aed', '#f5f3ff']
+  }
+  return ['#2f6bff', '#eef4ff']
+}
+
+onShow(() => {
+  // TAB 页登录守卫：直接刷新/清存储后不残留无登录态的页面
+  if (!isLoggedIn()) {
+    uni.reLaunch({ url: '/pages/login/login' })
+    return
+  }
+  const user = getUserInfo()
+  if (user != null && user.nickName != '') {
+    greeting.value = '你好，' + user.nickName
+  }
+  loadApps()
+})
+
+onPullDownRefresh(() => {
+  loadApps()
+})
+
+function loadApps() {
+  loading.value = true
+  errorMsg.value = ''
+  http('POST', API_APP_LIST, {}, (ok, res, msg) => {
+    loading.value = false
+    uni.stopPullDownRefresh()
+    if (!ok) {
+      errorMsg.value = msg
+      if (msg.indexOf('重新登录') >= 0 || msg.indexOf('过期') >= 0) {
+        return
+      }
+      uni.showToast({ title: msg, icon: 'none' })
+      return
+    }
+    const user = getUserInfo()
+    const isPlatformAdmin = user != null && user.roleKeys.indexOf('SuperPlatformRole') >= 0
+    const list = res?.getArray('data')
+    const result: AppItem[] = []
+    if (list != null) {
+      for (let i = 0; i < list.length; i++) {
+        const item = list[i] as UTSJSONObject
+        const code = item.getString('code') ?? ''
+        // 平台管理应用仅平台管理员可见（与 PC 首页口径一致）
+        if (code == 'PLATFORM' && !isPlatformAdmin) {
+          continue
+        }
+        const name = item.getString('appName') ?? code
+        const colors = colorOf(code)
+        const one: AppItem = {
+          id: item.getString('id') ?? '',
+          code: code,
+          appName: name,
+          shortName: name.substring(0, 1),
+          bgColor: colors[1],
+          fgColor: colors[0]
+        }
+        result.push(one)
+      }
+    }
+    apps.value = result
+  })
+}
+
+function openApp(app: AppItem) {
+  uni.navigateTo({
+    url: '/pages/app-detail/app-detail?appId=' + app.id + '&appCode=' + app.code + '&appName=' + encodeURIComponent(app.appName)
+  })
+}
+</script>
+
+<style>
+.page {
+	flex: 1;
+	background-color: #f4f6fa;
+}
+
+.header {
+	padding: 18px 20px 6px 20px;
+}
+
+.hello {
+	font-size: 22px;
+	font-weight: 700;
+	color: #1f2733;
+}
+
+.sub {
+	margin-top: 4px;
+	font-size: 12px;
+	color: #a2aab8;
+}
+
+.grid {
+	flex-direction: row;
+	flex-wrap: wrap;
+	padding: 10px 8px;
+}
+
+.app {
+	width: 33.3%;
+	align-items: center;
+	padding: 16px 0;
+}
+
+.app-icon {
+	width: 56px;
+	height: 56px;
+	border-radius: 14px;
+	align-items: center;
+	justify-content: center;
+}
+
+.app-icon-text {
+	font-size: 24px;
+	font-weight: 700;
+}
+
+.app-name {
+	margin-top: 8px;
+	font-size: 13px;
+	color: #4b5563;
+}
+
+.empty {
+	padding: 80px 40px;
+	align-items: center;
+}
+
+.empty-text {
+	font-size: 14px;
+	color: #a2aab8;
+	text-align: center;
+}
+
+.loading {
+	padding: 20px;
+	align-items: center;
+}
+
+.loading-text {
+	font-size: 13px;
+	color: #a2aab8;
+}
+</style>

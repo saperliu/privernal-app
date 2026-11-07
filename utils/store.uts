@@ -1,0 +1,123 @@
+/**
+ * 本地存储封装：服务器域名、PC 端地址、登录令牌、当前用户信息。
+ * 域名在登录页设置，按域名接入对应企业/环境的服务器。
+ */
+
+const KEY_BASE_URL = 'va_base_url'
+const KEY_PC_URL = 'va_pc_url'
+const KEY_TOKEN = 'va_token'
+const KEY_USER = 'va_user'
+
+export type UserInfo = {
+  userId: string
+  loginName: string
+  nickName: string
+  organizationName: string
+  organizationId: string
+  departmentName: string
+  departmentId: string
+  email: string
+  phone: string
+  roleKeys: string
+}
+
+export function getStorageString(key: string): string {
+  const v = uni.getStorageSync(key)
+  if (typeof v == 'string') {
+    return v
+  }
+  return ''
+}
+
+export function setStorageString(key: string, value: string) {
+  uni.setStorageSync(key, value)
+}
+
+/** 服务器地址（直连后端，如 http://192.168.1.10:8600），末尾不带斜杠 */
+/** 出厂默认企业域名（用户未配置服务器时使用） */
+export const DEFAULT_BASE_URL = 'https://privernal.com'
+
+export function getBaseUrl(): string {
+  let url = getStorageString(KEY_BASE_URL)
+  if (url == '') {
+    return DEFAULT_BASE_URL
+  }
+  while (url.endsWith('/')) {
+    url = url.substring(0, url.length - 1)
+  }
+  return url
+}
+
+export function setBaseUrl(url: string) {
+  setStorageString(KEY_BASE_URL, url)
+}
+
+/**
+ * PC 端页面地址（web-view 承载动态表单等页面用）。
+ * 未单独设置时默认取服务器地址的 origin（生产部署 PC 与后端同域）。
+ */
+export function getPcUrl(): string {
+  let url = getStorageString(KEY_PC_URL)
+  if (url == '') {
+    url = originOf(getBaseUrl())
+  }
+  while (url.endsWith('/')) {
+    url = url.substring(0, url.length - 1)
+  }
+  return url
+}
+
+export function setPcUrl(url: string) {
+  setStorageString(KEY_PC_URL, url)
+}
+
+/** 是否显式配置过 PC 端页面地址（未配置时 getPcUrl() 取服务器同域默认值） */
+export function hasExplicitPcUrl(): boolean {
+  return getStorageString(KEY_PC_URL) != ''
+}
+
+/** 取 http(s)://host:port 部分 */
+export function originOf(url: string): string {
+  const schemeIdx = url.indexOf('://')
+  if (schemeIdx < 0) {
+    return url
+  }
+  const rest = url.substring(schemeIdx + 3)
+  const slashIdx = rest.indexOf('/')
+  if (slashIdx < 0) {
+    return url
+  }
+  return url.substring(0, schemeIdx + 3) + rest.substring(0, slashIdx)
+}
+
+export function getToken(): string {
+  return getStorageString(KEY_TOKEN)
+}
+
+export function setToken(token: string) {
+  setStorageString(KEY_TOKEN, token)
+}
+
+export function clearToken() {
+  setStorageString(KEY_TOKEN, '')
+}
+
+export function getUserInfo(): UserInfo | null {
+  const raw = getStorageString(KEY_USER)
+  if (raw == '') {
+    return null
+  }
+  return JSON.parse<UserInfo>(raw)
+}
+
+export function setUserInfo(user: UserInfo) {
+  setStorageString(KEY_USER, JSON.stringify(user))
+}
+
+export function clearUserInfo() {
+  setStorageString(KEY_USER, '')
+}
+
+export function isLoggedIn(): boolean {
+  return getToken() != ''
+}

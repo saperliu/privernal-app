@@ -1,0 +1,311 @@
+/**
+ * 动态表单 schema 解析（原生渲染器核心）。
+ *
+ * 消费 GET /back/dynamic/form/code/{code} 与 POST /back/dynamic/formColumn/list
+ * 两个响应，把设计器 metaData 的组件树扁平化为移动端线性渲染字段：
+ * - 移动端纵向堆叠布局，不还原 PC 栅格（row/col 布局节点直接穿透）；
+ * - 只认识 MVP 字段类型（input/textarea/number/date/select/radio/relation-attr/user-select），
+ *   出现其他类型（子表/部门选择等）置 allSupported=false，页面据此回退 webview。
+ */
+
+export type FieldKind = 'text' | 'number' | 'date' | 'select' | 'relation' | 'user'
+
+export type FieldOption = {
+  label: string
+  value: string
+}
+
+export type RenderField = {
+  field: string
+  label: string
+  kind: FieldKind
+  rawType: string
+  /** select/radio 静态选项 */
+  options: FieldOption[]
+  /** relation-attr：被关联表编码与显示字段 */
+  relationCode: string
+  relationDisplay: string
+}
+
+export type FormSchemaInfo = {
+  formId: string
+  tableName: string
+  tableCode: string
+  isWorkflow: boolean
+  /** 表单字段（schema 顺序） */
+  fields: RenderField[]
+  /** 卡片显示字段编码（列配置 showList=1；无则取前 3 个业务字段） */
+  listFields: string[]
+  /** 搜索字段编码（列配置 showQuery=1 的首个 varchar；空串表示无搜索） */
+  queryField: string
+  /** 是否全部字段类型受支持（否则回退 webview） */
+  allSupported: boolean
+  /** 不受支持的类型名（回退提示用） */
+  unsupportedTypes: string[]
+}
+
+const KIND_TEXT: string[] = ['input', 'textarea']
+const KIND_NUMBER: string[] = ['number', 'input-number']
+const KIND_DATE: string[] = ['date', 'date-picker']
+const KIND_SELECT: string[] = ['select', 'radio']
+
+function kindOf(rawType: string): FieldKind | null {
+  if (KIND_TEXT.indexOf(rawType) >= 0) {
+    return 'text'
+  }
+  if (KIND_NUMBER.indexOf(rawType) >= 0) {
+    return 'number'
+  }
+  if (KIND_DATE.indexOf(rawType) >= 0) {
+    return 'date'
+  }
+  if (KIND_SELECT.indexOf(rawType) >= 0) {
+    return 'select'
+  }
+  if (rawType == 'relation-attr') {
+    return 'relation'
+  }
+  if (rawType == 'user-select') {
+    return 'user'
+  }
+  return null
+}
+
+function valueToString(v: any): string {
+  if (typeof v == 'string') {
+    return v as string
+  }
+  if (typeof v == 'number') {
+    return (v as number).toString()
+  }
+  if (typeof v == 'boolean') {
+    return (v as boolean) ? '是' : '否'
+  }
+  return ''
+}
+
+/** any → 显示文本（行内 id/数值等），供页面组装卡片时使用 */
+export function anyToString(v: any): string {
+  return valueToString(v)
+}
+
+/** snake_case → camelCase（详情接口双键返回的兜底口径） */
+function camelOf(field: string): string {
+  let out = ''
+  let cap = false
+  for (let i = 0; i < field.length; i++) {
+    const ch = field.charAt(i)
+    if (ch == '_') {
+      cap = true
+      continue
+    }
+    out += cap ? ch.toUpperCase() : ch
+    cap = false
+  }
+  return out
+}
+
+/**
+ * 行取值：列表口径 snake_case 优先，详情接口会同时返回 camelCase 键，兜底再取一次。
+ */
+export function rowValue(row: UTSJSONObject, field: string): string {
+  const v1 = row[field]
+  if (v1 != null) {
+    return valueToString(v1)
+  }
+  const v2 = row[camelOf(field)]
+  if (v2 != null) {
+    return valueToString(v2)
+  }
+  return ''
+}
+
+/** 原始值 → 显示文本（select 选项映射 / 日期截断 / 字典值原样） */
+export function displayValue(field: RenderField, raw: string, dictLabel: string): string {
+  if (raw == '') {
+    return ''
+  }
+  if (field.kind == 'select') {
+    for (let i = 0; i < field.options.length; i++) {
+      if (field.options[i].value == raw) {
+        return field.options[i].label
+      }
+    }
+    return raw
+  }
+  if (field.kind == 'relation' || field.kind == 'user') {
+    return dictLabel != '' ? dictLabel : raw
+  }
+  if (field.kind == 'date') {
+    return raw.length >= 10 ? raw.substring(0, 10) : raw
+  }
+  return raw
+}
+
+/**
+ * 解析 GET /back/dynamic/form/code/{code} 响应 → FormSchemaInfo（不含列配置合并）。
+ * 返回 null 表示响应结构异常。
+ */
+export function parseFormDetail(res: UTSJSONObject): FormSchemaInfo | null {
+  const data = res.getJSON('data')
+  if (data == null) {
+    return null
+  }
+  const metaData = data.getJSON('metaData')
+  const schemas = metaData?.getArray('schemas')
+  const fields: RenderField[] = []
+  const unsupported: string[] = []
+  if (schemas != null && schemas.length > 0) {
+    const root = schemas[0] as UTSJSONObject
+    const children = root.getArray('children')
+    if (children != null) {
+      for (let i = 0; i < children.length; i++) {
+        const node = children[i] as UTSJSONObject
+        const field = node.getString('field') ?? ''
+        const rawType = node.getString('type') ?? ''
+        if (field == '') {
+          continue
+        }
+        const label = node.getString('label') ?? field
+        const props = node.getJSON('props')
+        // select/radio 静态选项
+        const options: FieldOption[] = []
+        const optArr = props?.getArray('options')
+        if (optArr != null) {
+          for (let j = 0; j < optArr.length; j++) {
+            const opt = optArr[j] as UTSJSONObject
+            const one: FieldOption = {
+              label: opt.getString('label') ?? '',
+              value: opt.getString('value') ?? ''
+            }
+            options.push(one)
+          }
+        }
+        // relation-attr 关联配置
+        const relation = props?.getJSON('relation')
+        const relationCode = relation?.getString('formCode') ?? ''
+        const relationDisplay = relation?.getString('displayField') ?? ''
+        const kind = kindOf(rawType)
+        if (kind == null) {
+          if (unsupported.indexOf(rawType) < 0) {
+            unsupported.push(rawType)
+          }
+          continue
+        }
+        const rf: RenderField = {
+          field: field,
+          label: label,
+          kind: kind,
+          rawType: rawType,
+          options: options,
+          relationCode: relationCode,
+          relationDisplay: relationDisplay
+        }
+        fields.push(rf)
+      }
+    }
+  }
+  const info: FormSchemaInfo = {
+    formId: data.getString('id') ?? '',
+    tableName: data.getString('tableName') ?? '',
+    tableCode: data.getString('tableCode') ?? '',
+    isWorkflow: (data.getNumber('isWorkflow') ?? 0) == 1 || data.getString('isWorkflow') == '1',
+    fields: fields,
+    listFields: [],
+    queryField: '',
+    allSupported: unsupported.length == 0 && fields.length > 0,
+    unsupportedTypes: unsupported
+  }
+  return info
+}
+
+/**
+ * 合并列配置响应（POST /back/dynamic/formColumn/list）：
+ * - listFields = showList=1 的列编码，按列配置 sort 升序（PC 端列配置弹窗可设置，null 视为排最后）
+ *   —— 即"移动卡片显示的字段与顺序由 PC 端列配置决定"；
+ * - queryField = showQuery=1 的首个 varchar（同样按 sort 优先）。
+ */
+export function mergeColumns(info: FormSchemaInfo, res: UTSJSONObject) {
+  const data = res.getJSON('data')
+  const rawList = data?.getArray('list')
+  if (rawList == null) {
+    return
+  }
+  type ColSort = { code: string, sort: number }
+  const listCols: ColSort[] = []
+  let queryField = ''
+  let querySort = 2147483647
+  for (let i = 0; i < rawList.length; i++) {
+    const col = rawList[i] as UTSJSONObject
+    const code = col.getString('filedCode') ?? ''
+    if (code == '') {
+      continue
+    }
+    const showList = col.getString('showList') ?? (col.getNumber('showList')?.toString() ?? '0')
+    const showQuery = col.getString('showQuery') ?? (col.getNumber('showQuery')?.toString() ?? '0')
+    const filedType = col.getString('filedType') ?? ''
+    const sortRaw = col.getNumber('sort')
+    const sort = sortRaw == null ? 2147483647 : sortRaw
+    if (showList == '1') {
+      const one: ColSort = { code: code, sort: sort }
+      listCols.push(one)
+    }
+    if (showQuery == '1' && filedType == 'varchar' && sort < querySort) {
+      queryField = code
+      querySort = sort
+    }
+  }
+  // sort 升序（稳定排序：同 sort 按列配置返回顺序）
+  for (let i = 0; i < listCols.length; i++) {
+    for (let j = 0; j < listCols.length - 1 - i; j++) {
+      if (listCols[j].sort > listCols[j + 1].sort) {
+        const tmp = listCols[j]
+        listCols[j] = listCols[j + 1]
+        listCols[j + 1] = tmp
+      }
+    }
+  }
+  const listFields: string[] = []
+  for (let i = 0; i < listCols.length; i++) {
+    listFields.push(listCols[i].code)
+  }
+  if (listFields.length == 0) {
+    // 无列配置兜底：前 3 个业务字段
+    for (let i = 0; i < info.fields.length && i < 3; i++) {
+      listFields.push(info.fields[i].field)
+    }
+  }
+  info.listFields = listFields
+  info.queryField = queryField
+}
+
+/** 系统列的中文显示名（列配置 showList 含系统列时，卡片副字段标签用） */
+export function systemLabelOf(code: string): string {
+  if (code == 'title') {
+    return '数据标题'
+  }
+  if (code == 'created_name') {
+    return '创建人'
+  }
+  if (code == 'created_time') {
+    return '创建时间'
+  }
+  if (code == 'updated_time') {
+    return '更新时间'
+  }
+  if (code == 'department_name') {
+    return '部门'
+  }
+  if (code == 'id') {
+    return 'ID'
+  }
+  return code
+}
+
+/** 系统值的显示整理：时间戳截到分钟 */
+export function systemValueOf(raw: string): string {
+  if (raw.length >= 16 && raw.charAt(4) == '-' && raw.charAt(7) == '-') {
+    return raw.substring(0, 16)
+  }
+  return raw
+}

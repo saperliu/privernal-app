@@ -1,0 +1,1290 @@
+<template>
+	<view class="page">
+		<!-- 列表态 -->
+		<view class="flex1" v-if="mode == 0">
+			<view class="search-bar" v-if="queryFieldName != ''">
+				<input class="search-input" :value="searchValue" :placeholder="searchPlaceholder"
+					placeholder-style="color:#c0c6d2" @input="onSearchInput" @confirm="doSearch" />
+				<text class="search-btn" @click="doSearch">搜索</text>
+			</view>
+			<view class="list-header">
+				<text class="list-count">共 {{total}} 条</text>
+				<text class="add-btn" @click="enterAdd">＋ 新增</text>
+			</view>
+			<scroll-view scroll-y class="list-body" @scrolltolower="loadMore">
+				<view class="card" v-for="(card, index) in cards" :key="card.id" @click="openDetail(card)">
+					<text class="card-main">{{card.main}}</text>
+					<view class="card-sub-row" v-for="(sub, sIndex) in card.subs" :key="sIndex">
+						<text class="card-sub-label">{{sub.label}}：</text>
+						<text class="card-sub-value">{{sub.value}}</text>
+					</view>
+				</view>
+				<view class="empty" v-if="!loading && cards.length == 0">
+					<text class="empty-text">{{errorMsg == '' ? '暂无数据' : errorMsg}}</text>
+				</view>
+				<view class="loading" v-if="loading">
+					<text class="loading-text">加载中…</text>
+				</view>
+				<view class="loading" v-else-if="cards.length > 0 && !hasMore">
+					<text class="loading-text">没有更多了</text>
+				</view>
+				<view class="bottom-space"></view>
+			</scroll-view>
+		</view>
+
+		<!-- 详情态 -->
+		<scroll-view scroll-y class="flex1" v-if="mode == 1">
+			<view class="group">
+				<view class="row" v-for="(item, index) in detailItems" :key="item.label">
+					<text class="row-label">{{item.label}}</text>
+					<text class="row-value">{{item.value}}</text>
+				</view>
+			</view>
+
+			<!-- 任务处理态：来自任务消息的待办，按钮按流程节点按钮配置渲染 -->
+			<view class="form-card" v-if="detailTaskId != ''">
+				<text class="form-label">审批意见</text>
+				<textarea class="opinion-input" v-model="opinion" :maxlength="200"
+					placeholder="请输入审批意见（选填）" placeholder-style="color:#c0c6d2" auto-height></textarea>
+			</view>
+			<view class="btn-bar" v-if="detailTaskId != ''">
+				<view class="btn" v-for="(b, i) in taskBtns" :key="b.code"
+					:style="'background-color:' + b.bg" @click="onTaskBtn(b)">
+					<text class="btn-text" :style="'color:' + b.fg">{{b.label}}</text>
+				</view>
+			</view>
+			<view class="btn-bar" v-if="detailTaskId == '' && detailEntry == 'list'">
+				<view class="btn btn-edit" @click="enterEdit"><text class="btn-text-light">编辑</text></view>
+				<view class="btn btn-del" @click="confirmDelete"><text class="btn-text-danger">删除</text></view>
+			</view>
+			<view class="bottom-space"></view>
+		</scroll-view>
+
+		<!-- 表单态（新增/编辑） -->
+		<scroll-view scroll-y class="flex1" v-if="mode == 2">
+			<view class="form-card">
+				<view class="form-item" v-for="(item, index) in formItems" :key="item.field">
+					<text class="form-label">{{item.label}}</text>
+					<input v-if="item.kind == 'text'" class="form-input" :value="item.value"
+						:placeholder="'请输入' + item.label" placeholder-style="color:#c0c6d2"
+						@input="onTextInput(index, $event)" />
+					<input v-else-if="item.kind == 'number'" class="form-input" type="digit" :value="item.value"
+						:placeholder="'请输入' + item.label" placeholder-style="color:#c0c6d2"
+						@input="onTextInput(index, $event)" />
+					<picker v-else-if="item.kind == 'date'" mode="date" :value="item.value != '' ? item.value : todayStr"
+						@change="onDatePick(index, $event)">
+						<view class="pick-box">
+							<text :class="item.value != '' ? 'pick-text' : 'pick-placeholder'">{{item.value != '' ? item.value : '请选择' + item.label}}</text>
+						</view>
+					</picker>
+					<picker v-else mode="selector" :range="item.optionLabels" @change="onOptPick(index, $event)">
+						<view class="pick-box">
+							<text :class="item.text != '' ? 'pick-text' : 'pick-placeholder'">{{item.text != '' ? item.text : (item.loadingOptions ? '选项加载中…' : '请选择' + item.label)}}</text>
+						</view>
+					</picker>
+				</view>
+			</view>
+			<view class="btn-bar">
+				<view class="btn btn-cancel" @click="backToList"><text class="btn-text-muted">取消</text></view>
+				<view class="btn btn-save" @click="doSave"><text class="btn-text-light">{{saving ? '保存中…' : '保 存'}}</text></view>
+			</view>
+			<view class="bottom-space"></view>
+		</scroll-view>
+
+		<!-- 不受支持类型：回退 PC 页面 -->
+		<view class="flex1 fallback" v-if="mode == 3">
+			<text class="fallback-title">该表单包含暂不支持原生渲染的组件</text>
+			<text class="fallback-sub">{{unsupportedText}}</text>
+			<view class="btn btn-pc-fallback" @click="openPc"><text class="btn-text-light">打开 PC 版页面</text></view>
+		</view>
+	</view>
+</template>
+
+<script setup lang="uts">
+import {
+  parseFormDetail, mergeColumns, rowValue, displayValue, anyToString,
+  systemLabelOf, systemValueOf,
+  FormSchemaInfo, RenderField, FieldOption
+} from '@/renderer/schema.uts'
+import {
+  fetchFormByCode, fetchColumns, fetchRows, fetchRow, saveRow, deleteRow,
+  fetchRelationOptions, fetchUserOptions
+} from '@/renderer/data-service.uts'
+import {
+  http, API_FLOW_APPROVE, API_FLOW_REJECT, API_FLOW_TODO_LIST,
+  apiUrlFormVersionList, apiUrlFormVersionDetail, tableList
+} from '@/utils/http.uts'
+import { tableTotal, openPcWithHandshake } from '@/utils/http.uts'
+
+type CardSub = { label: string, value: string }
+type CardItem = { id: string, main: string, subs: CardSub[] }
+type DetailItem = { label: string, value: string }
+type FormValueItem = {
+  field: string
+  label: string
+  kind: string
+  value: string
+  text: string
+  optionLabels: string[]
+  optionValues: string[]
+  loadingOptions: boolean
+}
+
+// 模式：0 列表 / 1 详情 / 2 表单 / 3 不受支持回退
+const mode = ref(0)
+const cards = ref<CardItem[]>([])
+const detailItems = ref<DetailItem[]>([])
+const formItems = ref<FormValueItem[]>([])
+const loading = ref(false)
+const saving = ref(false)
+const total = ref(0)
+const hasMore = ref(false)
+const errorMsg = ref('')
+const searchValue = ref('')
+const queryFieldName = ref('')
+const searchPlaceholder = ref('搜索')
+const unsupportedText = ref('')
+
+let schema: FormSchemaInfo | null = null
+let tableCode = ''
+let appCodeParam = ''
+let titleParam = ''
+let queryFieldCode = ''
+let editId = ''
+let currentRow: UTSJSONObject | null = null
+let pageNum = 1
+const pageSize = 15
+let detailBusinessId = ''
+let detailTaskId = ''
+let needFindTask = false
+// 详情入口：'task'=任务消息/待办卡片进入（他人流程单据，不显示编辑删除），'list'=列表进入
+let detailEntry = 'list'
+const opinion = ref('')
+const handling = ref(false)
+let taskFlowCode = ''
+let taskNodeCode = ''
+const taskBtns = ref<UnifiedBtn[]>([])
+
+type UnifiedBtn = {
+  code: string
+  label: string
+  bg: string
+  fg: string
+}
+
+// 内置按钮中文名（与 PC 端 BUILTIN_BTNS 对齐）
+const BTN_LABELS = new Map<string, string>([
+  ['save', '保存'], ['viewform', '申请单'], ['approve', '通过'], ['reject', '驳回'],
+  ['transfer', '转办'], ['delegate', '委派'], ['addsign', '加签'], ['reducesign', '减签'],
+  ['jump', '跳转'], ['terminate', '终止'], ['revoke', '撤销']
+])
+
+// 历史写法/同义词归一
+const BTN_ALIASES = new Map<string, string>([
+  ['pass', 'approve'], ['agree', 'approve'], ['audit', 'approve'], ['detail', 'viewform'],
+  ['view', 'viewform'], ['applyform', 'viewform'], ['disapprove', 'reject'], ['back', 'reject'],
+  ['rollback', 'reject'], ['turnover', 'transfer'], ['assign', 'transfer'], ['delegation', 'delegate'],
+  ['sign', 'addsign'], ['add', 'addsign'], ['unsign', 'reducesign'], ['cancel', 'revoke'],
+  ['undo', 'revoke'], ['staging', 'save'], ['draft', 'save'], ['submit', 'save']
+])
+
+// 按钮语义分级配色（移动端审批样式）：approve 主色实底 / reject 浅红底红字 / 其余浅灰底深字
+
+function normalizeBtnCode(code: string): string {
+  let out = ''
+  for (let i = 0; i < code.length; i++) {
+    const c = code.charAt(i)
+    if (c == '_' || c == '-' || c == ' ') {
+      continue
+    }
+    out += c.toLowerCase()
+  }
+  return out
+}
+
+function canonicalBtnCode(code: string): string {
+  const n = normalizeBtnCode(code)
+  const alias = BTN_ALIASES.get(n)
+  return alias != null ? alias : n
+}
+
+function btnLabelOf(item: UTSJSONObject): string {
+  // 文案：中文别名 > 中文名称 > 内置中文名 > 原始编码
+  const aliasName = item.getString('aliasName') ?? ''
+  if (aliasName.length > 0 && hasChinese(aliasName)) {
+    return aliasName
+  }
+  const btnName = item.getString('btnName') ?? ''
+  if (btnName.length > 0 && hasChinese(btnName)) {
+    return btnName
+  }
+  const canonical = canonicalBtnCode(item.getString('btnCode') ?? '')
+  const label = BTN_LABELS.get(canonical)
+  return label != null ? label : (item.getString('btnCode') ?? '')
+}
+
+function hasChinese(s: string): boolean {
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i)
+    if (c >= 0x4e00 && c <= 0x9fa5) {
+      return true
+    }
+  }
+  return false
+}
+
+function btnStyleOf(item: UTSJSONObject): UnifiedBtn {
+  const canonical = canonicalBtnCode(item.getString('btnCode') ?? '')
+  const label = btnLabelOf(item)
+  // 配置了显式 hex 颜色：实底白字
+  const color = item.getString('color') ?? ''
+  if (color.length >= 4 && color.charAt(0) == '#') {
+    return { code: canonical, label: label, bg: color, fg: '#ffffff' }
+  }
+  if (canonical == 'approve') {
+    return { code: canonical, label: label, bg: '#2f6bff', fg: '#ffffff' }
+  }
+  if (canonical == 'reject') {
+    return { code: canonical, label: label, bg: '#fdecec', fg: '#f53f3f' }
+  }
+  return { code: canonical, label: label, bg: '#f4f6fa', fg: '#4b5563' }
+}
+
+/**
+ * 节点可见按钮：global 全局行 + 当前节点行（isShow=1，同码节点覆盖全局，按 sort 升序）；
+ * 无任何配置时回退默认（通过/驳回）
+ */
+function applyTaskBtns(list: Array<any>) {
+  const byCode = new Map<string, UTSJSONObject>()
+  for (let i = 0; i < list.length; i++) {
+    const item = list[i] as UTSJSONObject
+    const isShow = item.getString('isShow') ?? (item.getNumber('isShow')?.toString() ?? '0')
+    if (isShow != '1') {
+      continue
+    }
+    const nc = item.getString('nodeCode') ?? ''
+    const isGlobal = nc == '' || nc == 'global'
+    if (!isGlobal && nc != taskNodeCode) {
+      continue
+    }
+    const key = canonicalBtnCode(item.getString('btnCode') ?? '')
+    const prev = byCode.get(key)
+    if (prev != null) {
+      const prevNc = prev.getString('nodeCode') ?? ''
+      const prevGlobal = prevNc == '' || prevNc == 'global'
+      if (!prevGlobal && isGlobal) {
+        continue
+      }
+    }
+    byCode.set(key, item)
+  }
+  const out: UnifiedBtn[] = []
+  byCode.forEach((item, key) => {
+    out.push(btnStyleOf(item))
+  })
+  if (out.length == 0) {
+    // 未配置回退内置默认：通过/驳回
+    out.push({ code: 'approve', label: '通 过', bg: '#2f6bff', fg: '#ffffff' })
+    out.push({ code: 'reject', label: '驳 回', bg: '#fdecec', fg: '#f53f3f' })
+  }
+  taskBtns.value = out
+}
+
+/** 拉当前流程生效版本的按钮配置（currentFlag=Y > 已发布 > 首个） */
+function loadTaskBtnConfig() {
+  if (taskFlowCode == '') {
+    applyTaskBtns([])
+    return
+  }
+  http('GET', apiUrlFormVersionList(taskFlowCode), null, (ok, res, msg) => {
+    if (!ok) {
+      applyTaskBtns([])
+      return
+    }
+    const versions = res?.getArray('data')
+    if (versions == null || versions.length == 0) {
+      applyTaskBtns([])
+      return
+    }
+    let current: UTSJSONObject | null = null
+    for (let i = 0; i < versions.length; i++) {
+      const v = versions[i] as UTSJSONObject
+      if (v.getString('currentFlag') == 'Y') {
+        current = v
+        break
+      }
+    }
+    if (current == null) {
+      for (let i = 0; i < versions.length; i++) {
+        const v = versions[i] as UTSJSONObject
+        if ((v.getNumber('publishStatus') ?? 0) == 1) {
+          current = v
+          break
+        }
+      }
+    }
+    if (current == null && versions.length > 0) {
+      current = versions[0] as UTSJSONObject
+    }
+    if (current == null) {
+      applyTaskBtns([])
+      return
+    }
+    const vid = current.getString('id') ?? ''
+    if (vid == '') {
+      applyTaskBtns([])
+      return
+    }
+    http('GET', apiUrlFormVersionDetail(vid), null, (ok2, res2, msg2) => {
+      if (!ok2) {
+        applyTaskBtns([])
+        return
+      }
+      const detail = res2?.getJSON('data')
+      const permList = detail?.getArray('btnPermList')
+      applyTaskBtns(permList != null ? permList : [])
+    })
+  })
+}
+
+/** 任务按钮分发：通过/驳回 APP 内完成，其余操作引导至 PC 端 */
+function onTaskBtn(btn: UnifiedBtn) {
+  if (btn.code == 'approve') {
+    submitTask('approve')
+    return
+  }
+  if (btn.code == 'reject') {
+    confirmReject()
+    return
+  }
+  uni.showToast({ title: '该操作请在 PC 端完成', icon: 'none' })
+}
+// 字段编码 → 值→显示文本（relation/user 字典）；字段编码 → 完整选项（表单 picker）
+const dicts = new Map<string, Map<string, string>>()
+const optionsByField = new Map<string, FieldOption[]>()
+
+function pad2(n: number): string {
+  return n < 10 ? '0' + n.toString() : n.toString()
+}
+
+const todayStr = (() => {
+  const d = new Date()
+  return d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate())
+})()
+
+onLoad((query) => {
+  const codeRaw = query?.code as string | null
+  if (codeRaw != null && codeRaw.length > 0) {
+    tableCode = codeRaw
+  }
+  const titleRaw = query?.title as string | null
+  if (titleRaw != null) {
+    const decoded = decodeURIComponent(titleRaw)
+    if (decoded != null && decoded.length > 0) {
+      titleParam = decoded
+      uni.setNavigationBarTitle({ title: decoded })
+    }
+  }
+  const appRaw = query?.app as string | null
+  if (appRaw != null) {
+    appCodeParam = appRaw
+  }
+  const bidRaw = query?.businessId as string | null
+  if (bidRaw != null && bidRaw.length > 0) {
+    detailBusinessId = bidRaw
+  }
+  const tidRaw = query?.taskId as string | null
+  if (tidRaw != null && tidRaw.length > 0) {
+    detailTaskId = tidRaw
+  }
+  const findRaw = query?.findTask as string | null
+  if (findRaw != null && findRaw == '1') {
+    needFindTask = true
+  }
+  const fcRaw = query?.flowCode as string | null
+  if (fcRaw != null && fcRaw.length > 0) {
+    taskFlowCode = fcRaw
+  }
+  const nccRaw = query?.nodeCode as string | null
+  if (nccRaw != null && nccRaw.length > 0) {
+    taskNodeCode = nccRaw
+  }
+  // 任务处理入口（消息卡片/待办卡片）：businessId 有值时直接展示该单据的业务 form 详情
+  if (detailBusinessId != '') {
+    detailEntry = 'task'
+    loadSchemaThenDetail()
+    return
+  }
+  loadSchema()
+})
+
+function toast(msg: string) {
+  uni.showToast({ title: msg, icon: 'none' })
+}
+
+/** 任务处理入口：先拉表单 schema（详情字段渲染依赖），成功后拉单据详情 */
+function loadSchemaThenDetail() {
+  loading.value = true
+  fetchFormByCode(tableCode, (ok, res, msg) => {
+    if (!ok || res == null) {
+      loading.value = false
+      toast(msg)
+      return
+    }
+    const info = parseFormDetail(res)
+    if (info == null) {
+      loading.value = false
+      toast('表单定义解析失败')
+      return
+    }
+    schema = info
+    if (info.tableCode != '') {
+      tableCode = info.tableCode
+    }
+    // 详情渲染同样依赖字典（申请人/请假学生/所在班级等），先字典后详情
+    loadDictsThen(info, () => {
+      openDetailById(detailBusinessId)
+    })
+  })
+}
+
+function loadSchema() {
+  loading.value = true
+  errorMsg.value = ''
+  fetchFormByCode(tableCode, (ok, res, msg) => {
+    if (!ok || res == null) {
+      loading.value = false
+      errorMsg.value = msg
+      toast(msg)
+      return
+    }
+    const info = parseFormDetail(res)
+    if (info == null) {
+      loading.value = false
+      errorMsg.value = '表单定义解析失败'
+      toast(errorMsg.value)
+      return
+    }
+    schema = info
+    if (info.tableCode != '') {
+      tableCode = info.tableCode
+    }
+    fetchColumns(info.formId, (ok2, res2, msg2) => {
+      loading.value = false
+      const s = schema
+      if (ok2 && res2 != null && s != null) {
+        mergeColumns(s, res2)
+      }
+      if (s == null) {
+        return
+      }
+      if (!s.allSupported) {
+        unsupportedText.value = '组件类型：' + s.unsupportedTypes.join('、')
+        mode.value = 3
+        return
+      }
+      setupQueryName(s)
+      loadDictsThenList(s)
+    })
+  })
+}
+
+function setupQueryName(s: FormSchemaInfo) {
+  queryFieldCode = s.queryField
+  if (queryFieldCode != '') {
+    for (let i = 0; i < s.fields.length; i++) {
+      if (s.fields[i].field == queryFieldCode) {
+        queryFieldName.value = s.fields[i].label
+        break
+      }
+    }
+    if (queryFieldName.value == '') {
+      queryFieldName.value = queryFieldCode
+    }
+    searchPlaceholder.value = '按' + queryFieldName.value + '搜索'
+  }
+}
+
+/**
+ * 先把 relation/user 字典全部拉完，再拉列表渲染——
+ * 保证卡片/详情首屏显示时翻译已全部就绪（此前字典与列表并发竞态，
+ * 字典晚到时 relation 字段显示裸 id 且不回刷，出现"翻译不稳定"）
+ */
+function loadDictsThenList(s: FormSchemaInfo) {
+  loadDictsThen(s, () => {
+    refresh()
+  })
+}
+
+/** 并发拉完 relation/user 全部字典后回调 done（失败的字典降级原值显示，不卡流程） */
+function loadDictsThen(s: FormSchemaInfo, done: () => void) {
+  type DictJob = {
+    field: string
+    kind: string
+    relationCode: string
+    relationDisplay: string
+  }
+  const jobs: DictJob[] = []
+  let needUser = false
+  for (let i = 0; i < s.fields.length; i++) {
+    const f = s.fields[i]
+    if (f.kind == 'relation') {
+      const j: DictJob = {
+        field: f.field,
+        kind: 'relation',
+        relationCode: f.relationCode,
+        relationDisplay: f.relationDisplay
+      }
+      jobs.push(j)
+    } else if (f.kind == 'user') {
+      needUser = true
+    }
+  }
+  if (needUser) {
+    // 用户字典全表共享一份（__user__），多个 user 字段共用
+    const j: DictJob = { field: '__user__', kind: 'user', relationCode: '', relationDisplay: '' }
+    jobs.push(j)
+  }
+  if (jobs.length == 0) {
+    done()
+    return
+  }
+  loading.value = true
+  let finished = 0
+  for (let i = 0; i < jobs.length; i++) {
+    const job = jobs[i]
+    const finish = () => {
+      finished++
+      // 失败的字典也要放行（该字段降级显示原值），不卡住后续流程
+      if (finished == jobs.length) {
+        done()
+      }
+    }
+    if (job.kind == 'relation') {
+      fetchRelationOptions(job.relationCode, tableCode, job.relationDisplay, (ok, options, msg) => {
+        if (ok) {
+          applyOptions(job.field, options)
+        }
+        finish()
+      })
+    } else {
+      fetchUserOptions((ok, options, msg) => {
+        if (ok) {
+          applyOptions('__user__', options)
+          for (let k = 0; k < s.fields.length; k++) {
+            if (s.fields[k].kind == 'user') {
+              applyOptions(s.fields[k].field, options)
+            }
+          }
+        }
+        finish()
+      })
+    }
+  }
+}
+
+function applyOptions(fieldCode: string, options: FieldOption[]) {
+  optionsByField.set(fieldCode, options)
+  const dict = new Map<string, string>()
+  for (let i = 0; i < options.length; i++) {
+    dict.set(options[i].value, options[i].label)
+  }
+  dicts.set(fieldCode, dict)
+  // 表单态下同步选项进渲染项
+  for (let i = 0; i < formItems.value.length; i++) {
+    const item = formItems.value[i]
+    if (item.field != fieldCode) {
+      continue
+    }
+    if (item.optionValues.length == 0) {
+      const labels: string[] = []
+      const values: string[] = []
+      for (let j = 0; j < options.length; j++) {
+        labels.push(options[j].label)
+        values.push(options[j].value)
+      }
+      item.optionLabels = labels
+      item.optionValues = values
+      item.loadingOptions = false
+      if (item.value != '' && item.text == '') {
+        item.text = dict.get(item.value) ?? item.value
+      }
+    }
+  }
+}
+
+function findField(s: FormSchemaInfo, code: string): RenderField | null {
+  for (let i = 0; i < s.fields.length; i++) {
+    if (s.fields[i].field == code) {
+      return s.fields[i]
+    }
+  }
+  return null
+}
+
+function dictLabelOf(code: string, raw: string): string {
+  const dict = dicts.get(code)
+  if (dict == null) {
+    return ''
+  }
+  return dict.get(raw) ?? ''
+}
+
+function buildCard(s: FormSchemaInfo, row: UTSJSONObject, id: string): CardItem {
+  const subs: CardSub[] = []
+  // 卡片主标题：数据标题（每行都有 title 字段；空则回退首个配置列，再兜底 id）
+  let main = rowValue(row, 'title')
+  for (let i = 0; i < s.listFields.length && main == ''; i++) {
+    const raw = rowValue(row, s.listFields[i])
+    if (raw != '') {
+      main = raw
+    }
+  }
+  if (main == '') {
+    main = id
+  }
+  for (let i = 0; i < s.listFields.length; i++) {
+    const code = s.listFields[i]
+    if (code == 'title' || subs.length >= 4) {
+      // 数据标题已作主标题，不重复出现
+      continue
+    }
+    const raw = rowValue(row, code)
+    if (raw == '') {
+      continue
+    }
+    const f = findField(s, code)
+    if (f == null) {
+      // 系统列（title/created_name/created_time 等）：中文名 + 值整理
+      const sub: CardSub = { label: systemLabelOf(code), value: systemValueOf(raw) }
+      subs.push(sub)
+      continue
+    }
+    const shown = displayValue(f, raw, dictLabelOf(code, raw))
+    if (shown != '') {
+      const sub: CardSub = { label: f.label, value: shown }
+      subs.push(sub)
+    }
+  }
+  const card: CardItem = { id: id, main: main, subs: subs }
+  return card
+}
+
+function refresh() {
+  pageNum = 1
+  loadRows(false)
+}
+
+function loadRows(append: boolean) {
+  loading.value = true
+  errorMsg.value = ''
+  fetchRows(tableCode, pageNum, pageSize, queryFieldCode, searchValue.value, (ok, res, msg) => {
+    loading.value = false
+    if (!ok) {
+      errorMsg.value = msg
+      toast(msg)
+      return
+    }
+    const s = schema
+    if (s == null) {
+      return
+    }
+    const list = tableList(res)
+    const result: CardItem[] = append ? cards.value : []
+    if (list != null) {
+      for (let i = 0; i < list.length; i++) {
+        const row = list[i] as UTSJSONObject
+        const idRaw = row['id']
+        const id = idRaw == null ? '' : anyToString(idRaw)
+        result.push(buildCard(s, row, id))
+      }
+    }
+    cards.value = result
+    total.value = tableTotal(res)
+    hasMore.value = result.length < total.value
+  })
+}
+
+function loadMore() {
+  if (loading.value || !hasMore.value) {
+    return
+  }
+  pageNum++
+  loadRows(true)
+}
+
+function onSearchInput(e: UniInputEvent) {
+  searchValue.value = e.detail.value
+}
+
+function doSearch() {
+  refresh()
+}
+
+function openDetail(card: CardItem) {
+  mode.value = 1
+  openDetailById(card.id)
+}
+
+/** 按 id 拉单据详情并渲染（列表点击与任务处理入口共用） */
+function openDetailById(dataId: string) {
+  mode.value = 1
+  loading.value = true
+  fetchRow(tableCode, dataId, (ok, res, msg) => {
+    loading.value = false
+    if (!ok || res == null) {
+      toast(msg)
+      mode.value = 0
+      return
+    }
+    const row = res.getJSON('data')
+    if (row == null) {
+      toast('数据不存在')
+      mode.value = 0
+      return
+    }
+    currentRow = row
+    renderDetail(row)
+    // 消息入口没有 taskId：待办类消息按单据编号反查待办任务，查到即展示审批操作
+    if (detailTaskId == '' && needFindTask && detailBusinessId != '') {
+      findTaskByBusinessId(detailBusinessId)
+    }
+    if (detailTaskId != '') {
+      loadTaskBtnConfig()
+    }
+  })
+}
+
+/** 按单据编号反查当前用户的待办任务（拿到 taskId 即可审批） */
+function findTaskByBusinessId(bid: string) {
+  http('POST', API_FLOW_TODO_LIST, {
+    pageNum: 1,
+    pageSize: 5,
+    businessId: bid
+  }, (ok, res, msg) => {
+    if (!ok) {
+      return
+    }
+    const list = tableList(res)
+    if (list != null && list.length > 0) {
+      const row = list[0] as UTSJSONObject
+      const idRaw = row['id']
+      if (idRaw != null) {
+        detailTaskId = anyToString(idRaw)
+        loadTaskBtnConfig()
+      }
+    }
+  })
+}
+
+/** 审批提交：通过 / 驳回（驳回默认退回上一节点） */
+function submitTask(action: string) {
+  if (handling.value || detailTaskId == '') {
+    return
+  }
+  handling.value = true
+  const path = action == 'approve' ? API_FLOW_APPROVE : API_FLOW_REJECT
+  const body = {
+    taskId: detailTaskId,
+    message: opinion.value
+  } as UTSJSONObject
+  if (action == 'reject') {
+    // 退回发起人：初审等节点的上一节点是开始节点，warm-flow 禁止跳开始节点，
+    // 后端对 START 已做 BFS 适配（找发起后第一个中间节点）
+    body.set('rejectType', 'START')
+  }
+  http('PUT', path, body, (ok, res, msg) => {
+    handling.value = false
+    if (!ok) {
+      toast(msg == '' ? '操作失败' : msg)
+      return
+    }
+    toast(action == 'approve' ? '审批已通过' : '已驳回')
+    // 主路径（消息页 navigateTo 进入）栈内有上一页，navigateBack 正常返回任务消息；
+    // 刷新直达的空栈场景 navigateBack 静默失败，用户点底部 tab 即可离开（边缘场景不做特殊处理）
+    uni.navigateBack({})
+  })
+}
+
+function confirmReject() {
+  uni.showModal({
+    title: '提示',
+    content: '确定驳回该任务吗？将退回发起人。',
+    cancelText: '取消',
+    confirmText: '确定',
+    success: (res) => {
+      if (res.confirm) {
+        submitTask('reject')
+      }
+    }
+  })
+}
+
+function renderDetail(row: UTSJSONObject) {
+  const s = schema
+  if (s == null) {
+    return
+  }
+  const items: DetailItem[] = []
+  for (let i = 0; i < s.fields.length; i++) {
+    const f = s.fields[i]
+    const raw = rowValue(row, f.field)
+    const one: DetailItem = { label: f.label, value: displayValue(f, raw, dictLabelOf(f.field, raw)) }
+    items.push(one)
+  }
+  detailItems.value = items
+}
+
+function buildFormItems(row: UTSJSONObject | null) {
+  const s = schema
+  if (s == null) {
+    return
+  }
+  editId = row == null ? '' : rowValue(row, 'id')
+  const items: FormValueItem[] = []
+  for (let i = 0; i < s.fields.length; i++) {
+    const f = s.fields[i]
+    const raw = row == null ? '' : rowValue(row, f.field)
+    const item: FormValueItem = {
+      field: f.field,
+      label: f.label,
+      kind: f.kind,
+      value: '',
+      text: '',
+      optionLabels: [],
+      optionValues: [],
+      loadingOptions: false
+    }
+    if (f.kind == 'select') {
+      for (let j = 0; j < f.options.length; j++) {
+        item.optionLabels.push(f.options[j].label)
+        item.optionValues.push(f.options[j].value)
+      }
+      item.value = raw
+      item.text = displayValue(f, raw, '')
+    } else if (f.kind == 'date') {
+      item.value = raw.length >= 10 ? raw.substring(0, 10) : raw
+    } else if (f.kind == 'relation' || f.kind == 'user') {
+      item.value = raw
+      item.text = dictLabelOf(f.field, raw)
+      const cached = optionsByField.get(f.field)
+      if (cached == null) {
+        item.loadingOptions = true
+      } else {
+        for (let j = 0; j < cached.length; j++) {
+          item.optionLabels.push(cached[j].label)
+          item.optionValues.push(cached[j].value)
+        }
+      }
+    } else {
+      item.value = raw
+    }
+    items.push(item)
+  }
+  formItems.value = items
+  // 异步补拉缺失选项（relation 字典未就绪时）
+  for (let i = 0; i < s.fields.length; i++) {
+    const f = s.fields[i]
+    if ((f.kind == 'relation') && !optionsByField.has(f.field)) {
+      const fieldCode = f.field
+      fetchRelationOptions(f.relationCode, tableCode, f.relationDisplay, (ok, options, msg) => {
+        if (ok) {
+          applyOptions(fieldCode, options)
+        }
+      })
+    }
+  }
+}
+
+function enterAdd() {
+  currentRow = null
+  buildFormItems(null)
+  mode.value = 2
+}
+
+function enterEdit() {
+  if (currentRow == null) {
+    toast('数据未加载')
+    return
+  }
+  buildFormItems(currentRow)
+  mode.value = 2
+}
+
+function backToList() {
+  mode.value = 0
+}
+
+function onTextInput(index: number, e: UniInputEvent) {
+  formItems.value[index].value = e.detail.value
+}
+
+function onDatePick(index: number, e: UniPickerChangeEvent) {
+  formItems.value[index].value = (e.detail.value as string).split('/').join('-')
+}
+
+function onOptPick(index: number, e: UniPickerChangeEvent) {
+  const idx = e.detail.value as number
+  const item = formItems.value[index]
+  if (idx >= 0 && idx < item.optionValues.length) {
+    item.value = item.optionValues[idx]
+    item.text = item.optionLabels[idx]
+  }
+}
+
+function doSave() {
+  if (saving.value) {
+    return
+  }
+  if (schema != null && schema.isWorkflow && editId == '') {
+    uni.showModal({
+      title: '提示',
+      content: '该表单绑定了审批流程，提交后将发起流程，确认保存？',
+      cancelText: '取消',
+      confirmText: '确定',
+      success: (res) => {
+        if (res.confirm) {
+          submitSave()
+        }
+      }
+    })
+    return
+  }
+  submitSave()
+}
+
+function submitSave() {
+  saving.value = true
+  const values = new Map<string, string>()
+  for (let i = 0; i < formItems.value.length; i++) {
+    values.set(formItems.value[i].field, formItems.value[i].value)
+  }
+  saveRow(tableCode, editId, values, (ok, res, msg) => {
+    saving.value = false
+    if (!ok) {
+      toast(msg == '' ? '保存失败' : msg)
+      return
+    }
+    toast(editId == '' ? '保存成功' : '修改成功')
+    backToList()
+    refresh()
+  })
+}
+
+function confirmDelete() {
+  if (currentRow == null || editId == '') {
+    return
+  }
+  uni.showModal({
+    title: '提示',
+    content: '确定删除这条数据吗？',
+    cancelText: '取消',
+    confirmText: '确定',
+    success: (res) => {
+      if (!res.confirm) {
+        return
+      }
+      deleteRow(tableCode, editId, (ok, res2, msg) => {
+        if (!ok) {
+          toast(msg == '' ? '删除失败' : msg)
+          return
+        }
+        toast('已删除')
+        backToList()
+        refresh()
+      })
+    }
+  })
+}
+
+function openPc() {
+  // A2 握手：URL 只带一次性行权码，token 不再进 URL
+  openPcWithHandshake('/builder/' + tableCode, appCodeParam, (url: string) => {
+    uni.redirectTo({
+      url: '/pages/webview/webview?url=' + encodeURIComponent(url) + '&title=' + encodeURIComponent(titleParam)
+    })
+  })
+}
+</script>
+
+<style>
+.page {
+	flex: 1;
+	background-color: #f4f6fa;
+}
+
+.flex1 {
+	flex: 1;
+}
+
+.search-bar {
+	flex-direction: row;
+	align-items: center;
+	background-color: #ffffff;
+	padding: 8px 16px;
+}
+
+.search-input {
+	flex: 1;
+	height: 34px;
+	padding: 0 10px;
+	border-radius: 17px;
+	background-color: #f4f6fa;
+	font-size: 13px;
+}
+
+.search-btn {
+	margin-left: 10px;
+	font-size: 14px;
+	color: #2f6bff;
+}
+
+.list-header {
+	flex-direction: row;
+	align-items: center;
+	justify-content: space-between;
+	padding: 10px 16px 4px 16px;
+}
+
+.list-count {
+	font-size: 12px;
+	color: #9098a8;
+}
+
+.add-btn {
+	font-size: 14px;
+	color: #2f6bff;
+	font-weight: 600;
+}
+
+.list-body {
+	flex: 1;
+}
+
+.card {
+	margin: 10px 16px 0 16px;
+	background-color: #ffffff;
+	border-radius: 12px;
+	padding: 14px 16px;
+}
+
+.card-main {
+	font-size: 16px;
+	font-weight: 600;
+	color: #1f2733;
+}
+
+.card-sub-row {
+	margin-top: 8px;
+	flex-direction: row;
+}
+
+.card-sub-label {
+	font-size: 12px;
+	color: #9098a8;
+}
+
+.card-sub-value {
+	flex: 1;
+	font-size: 12px;
+	color: #4b5563;
+	text-align: right;
+}
+
+.group {
+	margin: 14px 16px 0 16px;
+	background-color: #ffffff;
+	border-radius: 12px;
+}
+
+.row {
+	flex-direction: row;
+	align-items: center;
+	padding: 13px 16px;
+	border-bottom-width: 0.5px;
+	border-bottom-color: #f0f2f7;
+	border-bottom-style: solid;
+}
+
+.row-label {
+	width: 84px;
+	font-size: 14px;
+	color: #9098a8;
+}
+
+.row-value {
+	flex: 1;
+	font-size: 15px;
+	color: #1f2733;
+	text-align: right;
+}
+
+.form-card {
+	margin: 14px 16px 0 16px;
+	background-color: #ffffff;
+	border-radius: 12px;
+	padding: 4px 16px 12px 16px;
+}
+
+.opinion-input {
+	width: 100%;
+	min-height: 64px;
+	margin-top: 6px;
+	padding: 8px 12px;
+	border: 1px solid #e2e6ef;
+	border-radius: 8px;
+	font-size: 14px;
+	background-color: #fafbfd;
+}
+
+.form-item {
+	margin-top: 14px;
+}
+
+.form-label {
+	font-size: 13px;
+	color: #4b5563;
+	margin-bottom: 6px;
+}
+
+.form-input {
+	height: 42px;
+	padding: 0 12px;
+	border: 1px solid #e2e6ef;
+	border-radius: 8px;
+	font-size: 15px;
+	background-color: #fafbfd;
+}
+
+.pick-box {
+	height: 42px;
+	padding: 0 12px;
+	border: 1px solid #e2e6ef;
+	border-radius: 8px;
+	background-color: #fafbfd;
+	justify-content: center;
+}
+
+.pick-text {
+	font-size: 15px;
+	color: #1f2733;
+}
+
+.pick-placeholder {
+	font-size: 15px;
+	color: #c0c6d2;
+}
+
+.btn-bar {
+	flex-direction: row;
+	padding: 16px 11px 6px 11px;
+}
+
+/* 自绘按钮基类：uni-app x 的 button 组件带默认 ::after 描边（跨端无法去除），统一 view+text 自绘 */
+.btn {
+	flex: 1;
+	height: 46px;
+	border-radius: 12px;
+	align-items: center;
+	justify-content: center;
+	margin: 0 5px;
+}
+
+.btn-text {
+	font-size: 15px;
+	font-weight: 600;
+}
+
+.btn-text-light {
+	font-size: 15px;
+	color: #ffffff;
+}
+
+.btn-text-danger {
+	font-size: 15px;
+	color: #f53f3f;
+}
+
+.btn-text-muted {
+	font-size: 15px;
+	color: #4b5563;
+}
+
+.btn-edit {
+	flex: 1;
+	margin-right: 6px;
+	background-color: #2f6bff;
+}
+
+.btn-del {
+	flex: 1;
+	margin-left: 6px;
+	background-color: #ffffff;
+}
+
+.btn-save {
+	flex: 2;
+	background-color: #2f6bff;
+}
+
+.btn-cancel {
+	flex: 1;
+	margin-right: 6px;
+	background-color: #ffffff;
+}
+
+.btn-pc-fallback {
+	margin-top: 24px;
+	width: 220px;
+	background-color: #2f6bff;
+}
+
+.fallback {
+	align-items: center;
+	padding: 80px 30px;
+}
+
+.fallback-title {
+	font-size: 16px;
+	font-weight: 600;
+	color: #1f2733;
+	text-align: center;
+}
+
+.fallback-sub {
+	margin-top: 10px;
+	font-size: 12px;
+	color: #9098a8;
+	text-align: center;
+}
+
+.fallback .btn-save {
+	margin-top: 24px;
+	flex: none;
+	width: 220px;
+}
+
+.empty {
+	padding: 80px 40px;
+	align-items: center;
+}
+
+.empty-text {
+	font-size: 14px;
+	color: #a2aab8;
+}
+
+.loading {
+	padding: 16px;
+	align-items: center;
+}
+
+.loading-text {
+	font-size: 13px;
+	color: #a2aab8;
+}
+
+.bottom-space {
+	height: 30px;
+}
+</style>

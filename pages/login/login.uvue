@@ -1,0 +1,473 @@
+<template>
+	<view class="page">
+		<!-- 右上角设置入口：服务器域名配置（正常文档流，absolute 定位在 web 端点击不命中） -->
+		<view class="settings-row">
+			<view class="settings-entry" @click="openSettings">
+				<text class="settings-icon">⚙</text>
+			</view>
+		</view>
+
+		<view class="brand">
+			<image class="brand-logo" src="/static/logo.png" mode="aspectFit"></image>
+			<text class="brand-title">春祈平台</text>
+			<text class="brand-sub">移动工作台</text>
+		</view>
+
+		<view class="card">
+			<view class="form-item">
+				<text class="label">账号</text>
+				<input class="input" v-model="loginName" placeholder="请输入账号" placeholder-style="color:#c0c6d2" />
+			</view>
+
+			<view class="form-item">
+				<text class="label">密码</text>
+				<input class="input" v-model="password" :password="true" placeholder="请输入密码"
+					placeholder-style="color:#c0c6d2" @confirm="doLogin" />
+			</view>
+
+			<view class="btn-login" @click="doLogin">
+				<text class="btn-login-text">{{loading ? '登录中…' : '登 录'}}</text>
+			</view>
+		</view>
+
+		<!-- 用户协议：登录须勾选 -->
+		<view class="agreement">
+			<view class="agreement-check" :class="agreed ? 'agreement-check-on' : ''" @click="agreed = !agreed">
+				<text class="agreement-check-mark" v-if="agreed">✓</text>
+			</view>
+			<text class="agreement-text">已阅读并同意</text>
+			<text class="agreement-link" @click="openAgreement('user')">《用户协议》</text>
+			<text class="agreement-text">和</text>
+			<text class="agreement-link" @click="openAgreement('privacy')">《隐私政策》</text>
+		</view>
+
+		<!-- 服务器域名设置弹窗 -->
+		<view class="mask" v-if="showSettings" @click="closeSettings">
+			<view class="dialog" @click.stop="">
+				<text class="dialog-title">服务器设置</text>
+				<text class="dialog-tip">填入企业域名（以 http:// 或 https:// 开头），登录后无需重复设置</text>
+				<input class="input" v-model="settingsUrl" placeholder="https://privernal.com"
+					placeholder-style="color:#c0c6d2" />
+				<view class="dialog-btns">
+					<view class="btn dlg-btn-cancel" @click="closeSettings"><text class="btn-text-muted">取消</text></view>
+					<view class="btn dlg-btn-save" @click="saveSettings"><text class="btn-text-light">保存</text></view>
+				</view>
+			</view>
+		</view>
+
+		<!-- 协议内容弹窗 -->
+		<view class="mask" v-if="showAgreement" @click="showAgreement = false">
+			<view class="dialog" @click.stop="">
+				<text class="dialog-title">{{agreementTitle}}</text>
+				<scroll-view scroll-y class="agreement-body">
+					<text class="agreement-content">{{agreementContent}}</text>
+				</scroll-view>
+				<view class="dialog-btns">
+					<view class="btn dlg-btn-save" @click="agreeAgreement"><text class="btn-text-light">同意并继续</text></view>
+				</view>
+			</view>
+		</view>
+	</view>
+</template>
+
+<script setup lang="uts">
+import { sha512 } from '@/utils/sha512.uts'
+import { apiLogin, apiLoginChallenge, API_GET_INFO } from '@/utils/http.uts'
+import {
+  getBaseUrl, setBaseUrl, getToken, setToken,
+  getUserInfo, setUserInfo, UserInfo
+} from '@/utils/store.uts'
+
+const loginName = ref('')
+const password = ref('')
+const loading = ref(false)
+const agreed = ref(false)
+const showSettings = ref(false)
+const settingsUrl = ref('')
+const showAgreement = ref(false)
+const agreementTitle = ref('')
+const agreementContent = ref('')
+
+const AGREEMENT_USER = '欢迎使用春祈平台移动工作台。使用本应用即表示您同意以下条款：\n\n1. 本应用用于访问您企业部署的低代码平台，账号由企业管理员分配；\n2. 您应妥善保管账号密码，因密码泄露造成的损失由您自行承担；\n3. 请勿利用本应用从事违反法律法规及企业制度的活动；\n4. 应用内数据的增删改操作将实时同步至企业服务器，请谨慎操作。'
+
+const AGREEMENT_PRIVACY = '我们重视您的个人信息保护：\n\n1. 本应用仅在本地存储登录令牌与服务器域名，用于保持登录状态；\n2. 您的账号、组织、部门等信息在登录时从企业服务器获取并缓存，退出登录或注销账号后即清除；\n3. 我们不会将您的个人信息提供给任何第三方；\n4. 如需删除您的账号及相关数据，可在「我的」页面使用注销账号功能。'
+
+onLoad(() => {
+  if (getToken() != '') {
+    enterWorkbench()
+    return
+  }
+  settingsUrl.value = getBaseUrl()
+})
+
+function enterWorkbench() {
+  uni.switchTab({
+    url: '/pages/workbench/workbench'
+  })
+}
+
+function toast(msg: string) {
+  uni.showToast({ title: msg, icon: 'none' })
+}
+
+function openSettings() {
+  settingsUrl.value = getBaseUrl()
+  showSettings.value = true
+}
+
+function closeSettings() {
+  showSettings.value = false
+}
+
+function saveSettings() {
+  const domain = settingsUrl.value.trim()
+  if (domain.indexOf('http://') != 0 && domain.indexOf('https://') != 0) {
+    toast('请填写正确的服务器域名（以 http:// 或 https:// 开头）')
+    return
+  }
+  // A3：口令摘要与 token 都会发往该地址——生产域名必须 https；
+  // 仅本机/内网地址允许 http（开发联调）
+  const rest = domain.substring(domain.indexOf('://') + 3)
+  const host = rest.indexOf('/') >= 0 ? rest.substring(0, rest.indexOf('/')) : rest
+  const isLocal = host.indexOf('localhost') == 0 || host.indexOf('127.') == 0
+      || host.indexOf('192.168.') == 0 || host.indexOf('10.') == 0 || host.indexOf('172.') == 0
+  if (domain.indexOf('https://') != 0 && !isLocal) {
+    toast('生产服务器地址必须使用 https')
+    return
+  }
+  setBaseUrl(domain)
+  showSettings.value = false
+  toast('服务器已设置')
+}
+
+function openAgreement(kind: string) {
+  if (kind == 'privacy') {
+    agreementTitle.value = '隐私政策'
+    agreementContent.value = AGREEMENT_PRIVACY
+  } else {
+    agreementTitle.value = '用户协议'
+    agreementContent.value = AGREEMENT_USER
+  }
+  showAgreement.value = true
+}
+
+function agreeAgreement() {
+  agreed.value = true
+  showAgreement.value = false
+}
+
+function doLogin() {
+  if (loading.value) {
+    return
+  }
+  if (getBaseUrl() == '') {
+    showSettings.value = true
+    toast('请先设置服务器域名')
+    return
+  }
+  if (!agreed.value) {
+    toast('请先阅读并同意用户协议和隐私政策')
+    return
+  }
+  const name = loginName.value.trim()
+  const pwd = password.value
+  if (name == '' || pwd == '') {
+    toast('请输入账号和密码')
+    return
+  }
+  loading.value = true
+  const wire = sha512(pwd)
+
+  // 原登录成功后的令牌落库与会话刷新（F4 挑战流程的最终回调，逻辑不变）
+  const finishLogin = (ok: boolean, res: UTSJSONObject | null, msg: string) => {
+    if (!ok) {
+      loading.value = false
+      toast(msg == '' ? '登录失败' : msg)
+      return
+    }
+    const data = res?.getJSON('data')
+    const token = data?.getString('token')
+    if (token == null || token == '') {
+      loading.value = false
+      toast('登录响应缺少令牌')
+      return
+    }
+    setToken(token)
+    // 刷新会话权限并保存当前用户信息（组织/部门/姓名）
+    uni.request({
+      url: getBaseUrl() + API_GET_INFO,
+      method: 'GET',
+      header: { 'Authorization': 'Bearer ' + token },
+      timeout: 20000,
+      success: (infoRes) => {
+        loading.value = false
+        const info = infoRes.data as UTSJSONObject | null
+        const infoData = info?.getJSON('data')
+        if (info?.getNumber('code') == 200 && infoData != null) {
+          const roles = infoData.getArray('roleKeys')
+          let roleKeys = ''
+          if (roles != null) {
+            roleKeys = roles.join(',')
+          }
+          const user: UserInfo = {
+            userId: infoData.getString('userId') ?? '',
+            loginName: infoData.getString('loginName') ?? name,
+            nickName: infoData.getString('nickName') ?? name,
+            organizationName: infoData.getString('organizationName') ?? '',
+            organizationId: infoData.getString('organizationId') ?? '',
+            departmentName: infoData.getString('departmentName') ?? '',
+            departmentId: infoData.getString('departmentId') ?? '',
+            email: infoData.getString('email') ?? '',
+            phone: infoData.getString('phone') ?? '',
+            roleKeys: roleKeys
+          }
+          setUserInfo(user)
+        }
+        enterWorkbench()
+      },
+      fail: () => {
+        loading.value = false
+        enterWorkbench()
+      }
+    })
+  }
+
+  // F4 挑战-应答流程：已迁移传 SHA512(nonce+线摘要)（截获值换 nonce 即失效）；
+  // 未迁移先静默提交一次旧摘要引导服务端封存，再取新 nonce 重试；
+  // 挑战关闭（服务端未配主密钥或旧版本后端）直传旧摘要走 bcrypt 口径
+  apiLoginChallenge(name, (cok, cres, _cmsg) => {
+    const cdata = cres?.getJSON('data')
+    const nonce = cdata?.getString('nonce') ?? ''
+    const nonceId = cdata?.getString('nonceId') ?? ''
+    if (!cok || cdata == null || cdata.getBoolean('enabled') != true || nonce == '' || nonceId == '') {
+      apiLogin(name, wire, null, finishLogin)
+      return
+    }
+    if (cdata.getBoolean('migrated') == true) {
+      apiLogin(name, sha512(nonce + wire), nonceId, finishLogin)
+      return
+    }
+    apiLogin(name, wire, null, (bok, _bres, bmsg) => {
+      if (!bok) {
+        finishLogin(false, null, bmsg)
+        return
+      }
+      apiLoginChallenge(name, (rok, rres, _rmsg) => {
+        const rdata = rres?.getJSON('data')
+        const rNonce = rdata?.getString('nonce') ?? ''
+        const rNonceId = rdata?.getString('nonceId') ?? ''
+        if (!rok || rdata == null || rdata.getBoolean('enabled') != true || rNonce == '' || rNonceId == '') {
+          apiLogin(name, wire, null, finishLogin)
+          return
+        }
+        apiLogin(name, sha512(rNonce + wire), rNonceId, finishLogin)
+      })
+    })
+  })
+}
+</script>
+
+<style>
+.page {
+	flex: 1;
+	background-color: #f4f6fa;
+}
+
+.settings-row {
+	flex-direction: row;
+	justify-content: flex-end;
+	padding: 14px 20px 0 20px;
+}
+
+.settings-entry {
+	width: 44px;
+	height: 44px;
+	align-items: center;
+	justify-content: center;
+}
+
+.settings-icon {
+	font-size: 20px;
+	color: #4b5563;
+}
+
+.brand {
+	align-items: center;
+	padding: 12px 0 30px 0;
+}
+
+.brand-logo {
+	width: 96px;
+	height: 84px;
+	margin-bottom: 10px;
+}
+
+.brand-title {
+	font-size: 26px;
+	font-weight: 700;
+	color: #1f2733;
+}
+
+.brand-sub {
+	margin-top: 6px;
+	font-size: 14px;
+	color: #9098a8;
+}
+
+.card {
+	margin: 0 20px;
+	padding: 20px;
+	background-color: #ffffff;
+	border-radius: 14px;
+}
+
+.form-item {
+	margin-bottom: 18px;
+}
+
+.label {
+	font-size: 14px;
+	color: #4b5563;
+	margin-bottom: 8px;
+}
+
+.input {
+	height: 44px;
+	padding: 0 12px;
+	border: 1px solid #e2e6ef;
+	border-radius: 8px;
+	font-size: 15px;
+	background-color: #fafbfd;
+}
+
+.btn-login {
+	margin-top: 6px;
+	height: 46px;
+	border-radius: 10px;
+	background-color: #2f6bff;
+	align-items: center;
+	justify-content: center;
+}
+
+.btn-login-text {
+	font-size: 16px;
+	color: #ffffff;
+}
+
+.agreement {
+	flex-direction: row;
+	align-items: center;
+	margin-top: 18px;
+	padding: 0 24px;
+	flex-wrap: wrap;
+	justify-content: center;
+}
+
+.agreement-check {
+	width: 16px;
+	height: 16px;
+	border-radius: 8px;
+	border-width: 1px;
+	border-style: solid;
+	border-color: #c0c6d2;
+	align-items: center;
+	justify-content: center;
+	margin-right: 6px;
+	background-color: #ffffff;
+}
+
+.agreement-check-on {
+	background-color: #2f6bff;
+	border-color: #2f6bff;
+}
+
+.agreement-check-mark {
+	font-size: 11px;
+	color: #ffffff;
+}
+
+.agreement-text {
+	font-size: 12px;
+	color: #9098a8;
+}
+
+.agreement-link {
+	font-size: 12px;
+	color: #2f6bff;
+}
+
+.mask {
+	position: absolute;
+	top: 0;
+	left: 0;
+	right: 0;
+	bottom: 0;
+	background-color: rgba(15, 23, 42, 0.45);
+	align-items: center;
+	justify-content: center;
+}
+
+.dialog {
+	width: 320px;
+	background-color: #ffffff;
+	border-radius: 14px;
+	padding: 20px;
+}
+
+.dialog-title {
+	font-size: 17px;
+	font-weight: 700;
+	color: #1f2733;
+	text-align: center;
+}
+
+.dialog-tip {
+	margin-top: 8px;
+	margin-bottom: 12px;
+	font-size: 12px;
+	color: #9098a8;
+}
+
+.dialog-btns {
+	flex-direction: row;
+	margin-top: 16px;
+}
+
+.btn {
+	height: 42px;
+	border-radius: 10px;
+	align-items: center;
+	justify-content: center;
+	flex: 1;
+}
+
+.dlg-btn-cancel {
+	background-color: #f4f6fa;
+	margin-right: 8px;
+}
+
+.dlg-btn-save {
+	background-color: #2f6bff;
+}
+
+.btn-text-light {
+	font-size: 15px;
+	color: #ffffff;
+}
+
+.btn-text-muted {
+	font-size: 15px;
+	color: #4b5563;
+}
+
+.agreement-body {
+	height: 320px;
+	margin-top: 12px;
+}
+
+.agreement-content {
+	font-size: 13px;
+	color: #4b5563;
+	line-height: 22px;
+}
+</style>

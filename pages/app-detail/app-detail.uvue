@@ -1,0 +1,321 @@
+<template>
+	<view class="page">
+		<scroll-view scroll-y class="body" v-if="sections.length > 0">
+			<view class="section" v-for="(section, sIndex) in sections" :key="section.title">
+				<text class="section-title">{{section.title}}</text>
+				<view class="grid-card">
+					<view class="tile" v-for="(item, iIndex) in section.items" :key="item.path" @click="openMenu(item)">
+						<view class="tile-icon" :style="'background-color:' + item.bgColor">
+							<text class="tile-icon-text" :style="'color:' + item.fgColor">{{item.short}}</text>
+						</view>
+						<text class="tile-name">{{item.name}}</text>
+					</view>
+				</view>
+			</view>
+			<view class="bottom-space"></view>
+		</scroll-view>
+
+		<view class="empty" v-if="!loading && sections.length == 0">
+			<text class="empty-text">{{errorMsg == '' ? '该应用暂无可用功能' : errorMsg}}</text>
+		</view>
+
+		<view class="loading" v-if="loading">
+			<text class="loading-text">加载中…</text>
+		</view>
+	</view>
+</template>
+
+<script setup lang="uts">
+import { http, apiUrlAppRouters, API_APP_LIST, openPcWithHandshake } from '@/utils/http.uts'
+import { getPcUrl, hasExplicitPcUrl, setPcUrl } from '@/utils/store.uts'
+
+type MenuItem = {
+  title: string
+  short: string
+  name: string
+  path: string
+  bgColor: string
+  fgColor: string
+}
+
+type MenuSection = {
+  title: string
+  items: MenuItem[]
+}
+
+const sections = ref<MenuSection[]>([])
+const loading = ref(false)
+const errorMsg = ref('')
+let appCode = ''
+let pcHintShown = false
+
+// 功能图标配色：三端一致的固定色板，按序循环
+const PALETTE: string[][] = [
+  ['#2f6bff', '#eef4ff'],
+  ['#0e7490', '#ecfeff'],
+  ['#ea580c', '#fff7ed'],
+  ['#7c3aed', '#f5f3ff'],
+  ['#16a34a', '#f0fdf4'],
+  ['#db2777', '#fdf2f8']
+]
+let paletteIndex = 0
+
+function nextColors(): string[] {
+  const c = PALETTE[paletteIndex % PALETTE.length]
+  paletteIndex++
+  return c
+}
+
+function shortOf(title: string): string {
+  return title.length > 0 ? title.substring(0, 1) : '•'
+}
+
+// 4 列宫格宽度有限，超长标题代码侧截断（跨端 text 省略号表现不一致）
+function nameOf(title: string): string {
+  return title.length > 5 ? title.substring(0, 5) + '…' : title
+}
+
+onLoad((query) => {
+  const appId = query?.appId ?? ''
+  appCode = query?.appCode ?? ''
+  let appName = '应用'
+  const appNameRaw = query?.appName as string | null
+  if (appNameRaw != null) {
+    const decoded = decodeURIComponent(appNameRaw)
+    if (decoded != null && decoded.length > 0) {
+      appName = decoded
+    }
+  }
+  uni.setNavigationBarTitle({ title: appName })
+  // 应用配置的 pc_path 优先（管理端可配），同步到本地 PC 地址供 webview/原生跳转使用
+  http('POST', API_APP_LIST, {}, (okApp, resApp, msgApp) => {
+    if (okApp && resApp != null) {
+      const apps = resApp.getArray('data')
+      if (apps != null) {
+        for (let i = 0; i < apps.length; i++) {
+          const a = apps[i] as UTSJSONObject
+          if ((a.getString('code') ?? '') == appCode) {
+            const pcPath = a.getString('pcPath') ?? ''
+            if (pcPath != '') {
+              setPcUrl(pcPath)
+            }
+            break
+          }
+        }
+      }
+    }
+    loadMenus(appId, appCode)
+  })
+})
+
+function nodeHidden(node: UTSJSONObject): boolean {
+  if (node.getBoolean('hidden') == true) {
+    return true
+  }
+  const meta = node.getJSON('meta')
+  if (meta != null && meta.getBoolean('hide') == true) {
+    return true
+  }
+  return false
+}
+
+function nodeTitle(node: UTSJSONObject, fallback: string): string {
+  const meta = node.getJSON('meta')
+  const title = meta?.getString('title')
+  return title == null || title == '' ? fallback : title
+}
+
+/**
+ * 菜单树扁平化：目录（有 children）作为分组标题，叶子（无 children）作为功能图标。
+ * 后端每次返回最新菜单，PC 端新建/授权的功能即时同步，APP 无需发版。
+ */
+function walk(nodes: Array<any>, sectionTitle: string, bucket: Map<string, MenuItem[]>) {
+  for (let i = 0; i < nodes.length; i++) {
+    const node = nodes[i] as UTSJSONObject
+    if (nodeHidden(node)) {
+      continue
+    }
+    const title = nodeTitle(node, '功能')
+    const children = node.getArray('children')
+    if (children != null && children.length > 0) {
+      walk(children, sectionTitle == '' ? title : sectionTitle, bucket)
+      continue
+    }
+    const path = node.getString('path') ?? ''
+    if (path == '') {
+      continue
+    }
+    let list = bucket.get(sectionTitle)
+    if (list == null) {
+      list = []
+      bucket.set(sectionTitle, list)
+    }
+    const colors = nextColors()
+    const one: MenuItem = {
+      title: title,
+      short: shortOf(title),
+      name: nameOf(title),
+      path: path,
+      bgColor: colors[1],
+      fgColor: colors[0]
+    }
+    list.push(one)
+  }
+}
+
+function loadMenus(appId: string, code: string) {
+  loading.value = true
+  errorMsg.value = ''
+  http('GET', apiUrlAppRouters(appId, code), null, (ok, res, msg) => {
+    loading.value = false
+    if (!ok) {
+      errorMsg.value = msg
+      uni.showToast({ title: msg, icon: 'none' })
+      return
+    }
+    const data = res?.getJSON('data')
+    const routes = data?.getArray('routes')
+    const result: MenuSection[] = []
+    if (routes != null) {
+      const bucket = new Map<string, MenuItem[]>()
+      walk(routes, '', bucket)
+      bucket.forEach((items, title) => {
+        const section: MenuSection = { title: title == '' ? '功能' : title, items: items }
+        result.push(section)
+      })
+    }
+    sections.value = result
+  })
+}
+
+// 系统管理/平台管理首批原生管理页：path → admin-page 类型
+const ADMIN_PAGES = new Map<string, string>([
+  ['/system/user', 'user'],
+  ['/system/department', 'dept'],
+  ['/system/role', 'role'],
+  ['/message/system-log-login', 'loginlog'],
+  ['/message/system-log-operation', 'operationlog']
+])
+
+function openMenu(item: MenuItem) {
+  // 首批原生管理页（配置化列表/树）
+  const adminPage = ADMIN_PAGES.get(item.path)
+  if (adminPage != null) {
+    uni.navigateTo({
+      url: '/pages/admin-page/admin-page?page=' + adminPage + '&title=' + encodeURIComponent(item.title)
+    })
+    return
+  }
+  // /builder/{code} 菜单 → 原生渲染页（卡片列表/详情/表单，schema 实时拉取免发版）
+  if (item.path.indexOf('/builder/') == 0) {
+    const rest = item.path.substring('/builder/'.length)
+    const qIdx = rest.indexOf('?')
+    const pathOnly = qIdx >= 0 ? rest.substring(0, qIdx) : rest
+    const segs = pathOnly.split('/')
+    let code = ''
+    for (let i = 0; i < segs.length; i++) {
+      if (segs[i] != '') {
+        code = segs[i]
+        break
+      }
+    }
+    if (code != '') {
+      uni.navigateTo({
+        url: '/pages/dynform/dynform?code=' + code + '&title=' + encodeURIComponent(item.title) + '&app=' + appCode
+      })
+      return
+    }
+  }
+  // 其余页面（大屏/报表/系统管理等）由 PC 端渲染，注入令牌后嵌入打开
+  // PC 端地址未显式配置时给出一次性提示（默认取服务器同域，本地联调/分离部署需在登录页配置）
+  if (!hasExplicitPcUrl() && !pcHintShown) {
+    pcHintShown = true
+    uni.showToast({ title: 'PC 页面默认取服务器同域：' + getPcUrl() + '，打不开时请在登录页高级设置配置', icon: 'none', duration: 3000 })
+  }
+  // A2 握手：URL 只带一次性行权码，token 不再进 URL
+  openPcWithHandshake(item.path, appCode, (url: string) => {
+    uni.navigateTo({
+      url: '/pages/webview/webview?url=' + encodeURIComponent(url) + '&title=' + encodeURIComponent(item.title)
+    })
+  })
+}
+</script>
+
+<style>
+.page {
+	flex: 1;
+	background-color: #f4f6fa;
+}
+
+.body {
+	flex: 1;
+}
+
+.section {
+	margin: 14px 16px 0 16px;
+}
+
+.section-title {
+	font-size: 13px;
+	color: #7a8496;
+	margin-bottom: 8px;
+}
+
+.grid-card {
+	background-color: #ffffff;
+	border-radius: 12px;
+	flex-direction: row;
+	flex-wrap: wrap;
+	padding: 8px 0 14px 0;
+}
+
+.tile {
+	width: 25%;
+	align-items: center;
+	padding: 12px 4px 0 4px;
+}
+
+.tile-icon {
+	width: 48px;
+	height: 48px;
+	border-radius: 12px;
+	align-items: center;
+	justify-content: center;
+}
+
+.tile-icon-text {
+	font-size: 20px;
+	font-weight: 700;
+}
+
+.tile-name {
+	margin-top: 6px;
+	font-size: 12px;
+	color: #4b5563;
+	text-align: center;
+}
+
+.empty {
+	padding: 100px 40px;
+	align-items: center;
+}
+
+.empty-text {
+	font-size: 14px;
+	color: #a2aab8;
+}
+
+.loading {
+	padding: 20px;
+	align-items: center;
+}
+
+.loading-text {
+	font-size: 13px;
+	color: #a2aab8;
+}
+
+.bottom-space {
+	height: 30px;
+}
+</style>

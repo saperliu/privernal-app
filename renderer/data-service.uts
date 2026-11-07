@@ -1,0 +1,175 @@
+/**
+ * 动态表单数据服务（原生渲染器数据层）。
+ *
+ * 契约与 PC 端 privernal-platform-ui 保持一致：
+ * - 列表  POST /dbs/open/dynamic/data/list        {tableCode, pageNum, pageSize, <字段过滤>}
+ * - 详情  GET  /dbs/open/dynamic/{tableCode}/{id}  行内 snake/camel 双键，取值走 schema.rowValue
+ * - 保存  POST /dbs/open/dynamic/data/add          {…表单值, tableCode, id?}（新增不带 id）
+ * - 删除  DELETE /dbs/open/dynamic/{tableCode}/{id}
+ * - 关联  POST /dbs/open/dynamic/data/relationList {tableCode:被关联表, fromTableCode, displayField}
+ * - 用户  POST /back/system/user/list               （user-select 字段的字典）
+ */
+import { http, tableList, tableTotal } from '@/utils/http.uts'
+import { FieldOption } from './schema.uts'
+
+export type DataDone = (ok: boolean, res: UTSJSONObject | null, msg: string) => void
+
+/** 表单定义（含 metaData schema） */
+export function fetchFormByCode(code: string, done: DataDone) {
+  http('GET', '/back/dynamic/form/code/' + code, null, done)
+}
+
+/** 列配置（按 formId 过滤，否则返回全部表单的列） */
+export function fetchColumns(formId: string, done: DataDone) {
+  http('POST', '/back/dynamic/formColumn/list', {
+    formId: formId,
+    pageNum: 1,
+    pageSize: 10000
+  }, done)
+}
+
+/** 数据分页列表（queryField/queryValue 非空时按等值过滤，空值不上送——与 PC sanitize 口径一致） */
+export function fetchRows(tableCode: string, pageNum: number, pageSize: number,
+  queryField: string, queryValue: string, done: DataDone) {
+  const body = {
+    tableCode: tableCode,
+    pageNum: pageNum,
+    pageSize: pageSize
+  } as UTSJSONObject
+  if (queryField != '' && queryValue != '') {
+    body.set(queryField, queryValue)
+  }
+  http('POST', '/dbs/open/dynamic/data/list', body, done)
+}
+
+/** 数据详情 */
+export function fetchRow(tableCode: string, id: string, done: DataDone) {
+  http('GET', '/dbs/open/dynamic/' + tableCode + '/' + id, null, done)
+}
+
+/**
+ * 保存（新增/编辑同端点）：编辑带 id 走更新分支；工作流表单不带 startFlow
+ * 与 PC 主路径一致（提交即发起）。
+ */
+export function saveRow(tableCode: string, editId: string, values: Map<string, string>, done: DataDone) {
+  const body = {
+    tableCode: tableCode
+  } as UTSJSONObject
+  if (editId != '') {
+    body.set('id', editId)
+  }
+  values.forEach((value, key) => {
+    if (value != '') {
+      body.set(key, value)
+    }
+  })
+  http('POST', '/dbs/open/dynamic/data/add', body, done)
+}
+
+/** 删除 */
+export function deleteRow(tableCode: string, id: string, done: DataDone) {
+  http('DELETE', '/dbs/open/dynamic/' + tableCode + '/' + id, null, done)
+}
+
+/** 关联字段选项：被关联表行 → {label=displayField 值, value=id} */
+export function fetchRelationOptions(relationCode: string, fromTableCode: string, displayField: string,
+  done: (ok: boolean, options: FieldOption[], msg: string) => void) {
+  http('POST', '/dbs/open/dynamic/data/relationList', {
+    tableCode: relationCode,
+    fromTableCode: fromTableCode,
+    displayField: displayField,
+    pageNum: 1,
+    pageSize: 10000
+  }, (ok, res, msg) => {
+    if (!ok) {
+      done(false, [], msg)
+      return
+    }
+    const list = tableList(res)
+    const options: FieldOption[] = []
+    if (list != null) {
+      for (let i = 0; i < list.length; i++) {
+        const row = list[i] as UTSJSONObject
+        const idRaw = row['id']
+        const one: FieldOption = {
+          label: rowValueOf(row, displayField),
+          value: idRaw == null ? '' : valueText(idRaw)
+        }
+        if (one.value != '' && one.label != '') {
+          options.push(one)
+        }
+      }
+    }
+    done(true, options, '')
+  })
+}
+
+/** 用户字典（user-select 字段）：{label=昵称, value=id} */
+export function fetchUserOptions(done: (ok: boolean, options: FieldOption[], msg: string) => void) {
+  http('POST', '/back/system/user/list', {
+    pageNum: 1,
+    pageSize: 9999
+  }, (ok, res, msg) => {
+    if (!ok) {
+      done(false, [], msg)
+      return
+    }
+    const list = tableList(res)
+    const options: FieldOption[] = []
+    if (list != null) {
+      for (let i = 0; i < list.length; i++) {
+        const row = list[i] as UTSJSONObject
+        const idRaw = row['id']
+        const nick = row['nickName']
+        const userName = row['userName']
+        const one: FieldOption = {
+          label: nick != null ? valueText(nick) : (userName != null ? valueText(userName) : ''),
+          value: idRaw == null ? '' : valueText(idRaw)
+        }
+        if (one.value != '' && one.label != '') {
+          options.push(one)
+        }
+      }
+    }
+    done(true, options, '')
+  })
+}
+
+function valueText(v: any): string {
+  if (typeof v == 'string') {
+    return v as string
+  }
+  if (typeof v == 'number') {
+    return (v as number).toString()
+  }
+  return ''
+}
+
+function camel(field: string): string {
+  let out = ''
+  let cap = false
+  for (let i = 0; i < field.length; i++) {
+    const ch = field.charAt(i)
+    if (ch == '_') {
+      cap = true
+      continue
+    }
+    out += cap ? ch.toUpperCase() : ch
+    cap = false
+  }
+  return out
+}
+
+/** 与 schema.uts 的 rowValue 同口径（避免循环依赖，这里内联兜底 camel） */
+function rowValueOf(row: UTSJSONObject, field: string): string {
+  const v1 = row[field]
+  if (v1 != null) {
+    return valueText(v1)
+  }
+  const camelKey = camel(field)
+  const v2 = row[camelKey]
+  if (v2 != null) {
+    return valueText(v2)
+  }
+  return ''
+}
