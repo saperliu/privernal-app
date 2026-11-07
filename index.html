@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+	<head>
+		<meta charset="UTF-8" />
+		<script>
+			var coverSupport = 'CSS' in window && typeof CSS.supports === 'function' && (CSS.supports('top: env(a)') ||
+				CSS.supports('top: constant(a)'))
+			document.write(
+				'<meta name="viewport" content="width=device-width, user-scalable=no, initial-scale=1.0, maximum-scale=1.0, minimum-scale=1.0' +
+				(coverSupport ? ', viewport-fit=cover' : '') + '" />')
+		</script>
+		<title>春祈平台</title>
+		<style>
+			/* web 端：移除 tab 页 uni-page-body 的 tabbar 占位伪元素（50px 透明条），
+			   使内容区延伸到 tabbar 顶边；该文件仅参与 web 编译，App 端无此占位不受影响 */
+			uni-app.uni-app--showtabbar uni-page-body::after {
+				display: none !important;
+			}
+		</style>
+		<script>
+			/* web 端：框架把页面标题（URL 编码态）同步到页面根 view 的 title 属性，
+			   hover 出现编码 tooltip——监听并移除；仅影响 web 端 */
+			(function () {
+				var scan = function () {
+					document.querySelectorAll('.page[title]').forEach(function (el) {
+						el.removeAttribute('title');
+					});
+				};
+				var start = function () {
+					scan();
+					new MutationObserver(scan).observe(document.body, {
+						subtree: true,
+						attributes: true,
+						attributeFilter: ['title'],
+						childList: true
+					});
+				};
+				if (document.body) {
+					start();
+				} else {
+					document.addEventListener('DOMContentLoaded', start);
+				}
+			})();
+		</script>
+		<!--preload-links-->
+		<!--app-context-->
+	</head>
+	<body>
+		<div id="app"><!--app-html--></div>
+		<script type="module" src="/main"></script>
+	</body>
+</html>

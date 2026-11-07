@@ -1,0 +1,735 @@
+<template>
+	<view class="page">
+		<view class="seg">
+			<view class="seg-item" :class="seg == 'sys' ? 'seg-active' : ''" @click="switchSeg('sys')">
+				<text class="seg-text" :class="seg == 'sys' ? 'seg-text-active' : ''">系统消息</text>
+				<view class="badge" v-if="unreadCount > 0">
+					<text class="badge-text">{{unreadCount}}</text>
+				</view>
+			</view>
+			<view class="seg-item" :class="seg == 'task' ? 'seg-active' : ''" @click="switchSeg('task')">
+				<text class="seg-text" :class="seg == 'task' ? 'seg-text-active' : ''">任务消息</text>
+				<view class="badge" v-if="todoCount > 0">
+					<text class="badge-text">{{todoCount}}</text>
+				</view>
+			</view>
+		</view>
+
+		<!-- 系统消息（通知/报警） -->
+		<scroll-view scroll-y class="body" v-if="seg == 'sys'" @scrolltolower="loadMoreMessages">
+			<view class="toolbar" v-if="messages.length > 0">
+				<text class="toolbar-btn" @click="readAll">全部已读</text>
+			</view>
+			<view class="msg-card" v-for="(msg, index) in messages" :key="msg.id" @click="openMessage(msg)">
+				<view class="msg-head">
+					<text class="msg-title">{{msg.mainTitle}}</text>
+					<view class="dot" v-if="!msg.read"></view>
+				</view>
+				<text class="msg-sub" v-if="msg.subTitle != ''">{{msg.subTitle}}</text>
+				<view class="msg-foot">
+					<text class="msg-type">{{msg.typeText}}</text>
+					<text class="msg-sender">{{msg.createdName}}</text>
+				</view>
+			</view>
+			<view class="empty" v-if="!loading && messages.length == 0">
+				<text class="empty-text">暂无系统消息</text>
+			</view>
+			<view class="loading" v-if="loading">
+				<text class="loading-text">加载中…</text>
+			</view>
+			<view class="loading" v-else-if="messages.length > 0 && !hasMoreMessages">
+				<text class="loading-text">没有更多了</text>
+			</view>
+		</scroll-view>
+
+		<!-- 任务消息：三口径统计 + 统一列表（待办任务 + 审批/工单消息按时间混排） -->
+		<scroll-view scroll-y class="body" v-if="seg == 'task'">
+			<view class="count-row">
+				<view class="count-card">
+					<text class="count-num">{{todoCount}}</text>
+					<text class="count-label">待办任务</text>
+				</view>
+				<view class="count-card">
+					<text class="count-num">{{doneCount}}</text>
+					<text class="count-label">已办任务</text>
+				</view>
+				<view class="count-card">
+					<text class="count-num">{{startCount}}</text>
+					<text class="count-label">我发起的</text>
+				</view>
+			</view>
+
+			<view class="task-card" v-for="(item, index) in unified" :key="item.key" @click="unifiedTap(item)">
+				<view class="msg-head">
+					<text class="msg-title">{{item.title}}</text>
+					<view class="dot" v-if="!item.read"></view>
+				</view>
+				<text class="msg-sub" v-if="item.sub != ''">{{item.sub}}</text>
+				<view class="msg-foot">
+					<text class="msg-type" :class="item.kind == 'task' ? 'tag-todo' : ''">{{item.tag}}</text>
+					<text class="msg-sender">{{item.timeText}}</text>
+				</view>
+			</view>
+			<view class="empty" v-if="!unifiedLoading && unified.length == 0">
+				<text class="empty-text">暂无任务消息</text>
+			</view>
+			<view class="loading" v-if="unifiedLoading">
+				<text class="loading-text">加载中…</text>
+			</view>
+			<view class="bottom-space"></view>
+		</scroll-view>
+	</view>
+</template>
+
+<script setup lang="uts">
+import {
+  http, tableList, tableTotal,
+  API_USER_MESSAGE_LIST, apiUrlMessageRead, API_MESSAGE_READ_ALL,
+  API_FLOW_TODO_LIST, API_FLOW_TASK_COUNT
+} from '@/utils/http.uts'
+import { openPcWithHandshake } from '@/utils/http.uts'
+
+type MsgItem = {
+  id: string
+  mainTitle: string
+  subTitle: string
+  content: string
+  typeText: string
+  createdName: string
+  timeText: string
+  read: boolean
+}
+
+type UnifiedItem = {
+  key: string
+  kind: string
+  id: string
+  title: string
+  sub: string
+  tag: string
+  timeText: string
+  sortKey: string
+  detailUrl: string
+  formPath: string
+  flowCode: string
+  nodeCode: string
+  businessId: string
+  read: boolean
+}
+
+const seg = ref('sys')
+const loading = ref(false)
+const messages = ref<MsgItem[]>([])
+const unified = ref<UnifiedItem[]>([])
+const unreadCount = ref(0)
+const todoCount = ref(0)
+const doneCount = ref(0)
+const startCount = ref(0)
+const unifiedLoading = ref(false)
+let msgPageNum = 1
+const msgPageSize = 15
+let hasMoreMessages = true
+
+onShow(() => {
+  // 角标常显：无论当前在哪个分段，未读数与待办数都要拉
+  loadCounts()
+  loadMessages(false)
+  if (seg.value == 'task' && unified.value.length == 0) {
+    loadUnified()
+  }
+})
+
+function switchSeg(target: string) {
+  if (seg.value == target) {
+    return
+  }
+  seg.value = target
+  if (target == 'task' && unified.value.length == 0) {
+    loadUnified()
+  }
+}
+
+/** 后端 Long→String：计数可能返回字符串数字，两种口径都兜 */
+function countOf(data: UTSJSONObject | null, key: string): number {
+  const n = data?.getNumber(key)
+  if (n != null) {
+    return n
+  }
+  const s = data?.getString(key)
+  if (s != null && s.length > 0) {
+    const p = parseInt(s)
+    return p >= 0 ? p : 0
+  }
+  return 0
+}
+
+/** ISO 时间（2026-10-16T03:30:01.000+08:00）→ yyyy-MM-dd HH:mm */
+function formatTime(raw: string): string {
+  if (raw.length < 16) {
+    return raw
+  }
+  const t = raw.indexOf('T')
+  if (t > 0 && t <= 10) {
+    return raw.substring(0, 10) + ' ' + raw.substring(11, 16)
+  }
+  return raw.substring(0, 16)
+}
+
+function typeTextOf(messageType: string | null): string {
+  const t = messageType ?? ''
+  if (t == 'WORKFLOW') {
+    return '任务'
+  }
+  if (t == 'ALARM') {
+    return '报警'
+  }
+  return '通知'
+}
+
+function taskTagOf(title: string): string {
+  if (title.indexOf('超时') >= 0) {
+    return '超时'
+  }
+  if (title.indexOf('待办') >= 0) {
+    return '审批'
+  }
+  return '工单'
+}
+
+function loadMessages(append: boolean) {
+  loading.value = true
+  http('POST', API_USER_MESSAGE_LIST, {
+    pageNum: msgPageNum,
+    pageSize: msgPageSize
+  }, (ok, res, msg) => {
+    loading.value = false
+    if (!ok) {
+      if (!append) {
+        uni.showToast({ title: msg, icon: 'none' })
+      }
+      return
+    }
+    const list = tableList(res)
+    const total = tableTotal(res)
+    const result: MsgItem[] = append ? messages.value : []
+    let unread = 0
+    if (list != null) {
+      for (let i = 0; i < list.length; i++) {
+        const item = list[i] as UTSJSONObject
+        const read = item.getString('readStatus') == '1'
+        // 任务类（WORKFLOW：审批/工单消息）归"任务消息"分段，系统消息分段只留通知/报警
+        if ((item.getString('messageType') ?? '') == 'WORKFLOW') {
+          continue
+        }
+        if (!read) {
+          unread++
+        }
+        const one: MsgItem = {
+          id: item.getString('id') ?? '',
+          mainTitle: item.getString('mainTitle') ?? '',
+          subTitle: item.getString('subTitle') ?? '',
+          content: item.getString('content') ?? '',
+          typeText: typeTextOf(item.getString('messageType')),
+          createdName: item.getString('createdName') ?? '',
+          timeText: formatTime(item.getString('createdTime') ?? ''),
+          read: read
+        }
+        result.push(one)
+      }
+    }
+    messages.value = result
+    hasMoreMessages = result.length < total
+    unreadCount.value = unread
+  })
+}
+
+function loadMoreMessages() {
+  if (loading.value || !hasMoreMessages) {
+    return
+  }
+  msgPageNum++
+  loadMessages(true)
+}
+
+function markRead(msg: MsgItem) {
+  if (msg.read) {
+    return
+  }
+  http('PUT', apiUrlMessageRead(msg.id), null, (ok, res, msg2) => {
+    if (ok) {
+      const result: MsgItem[] = []
+      for (let i = 0; i < messages.value.length; i++) {
+        const m = messages.value[i]
+        if (m.id == msg.id) {
+          m.read = true
+        }
+        result.push(m)
+      }
+      messages.value = result
+      if (unreadCount.value > 0) {
+        unreadCount.value = unreadCount.value - 1
+      }
+    }
+  })
+}
+
+function openMessage(msg: MsgItem) {
+  markRead(msg)
+  uni.showModal({
+    title: msg.mainTitle,
+    content: msg.content != '' ? msg.content : (msg.subTitle != '' ? msg.subTitle : '暂无内容'),
+    showCancel: false,
+    confirmText: '确定'
+  })
+}
+
+/**
+ * 全部已读：接口失败（后端未重启/网络）时降级为逐条标记，
+ * 单条失败静默——不让整批操作因个别消息失败而报错
+ */
+function readAll() {
+  http('PUT', API_MESSAGE_READ_ALL, null, (ok, res, msg) => {
+    if (ok) {
+      msgPageNum = 1
+      hasMoreMessages = true
+      loadMessages(false)
+      uni.showToast({ title: '已全部标记为已读', icon: 'none' })
+      return
+    }
+    readAllOneByOne()
+  })
+}
+
+function readAllOneByOne() {
+  const unread: MsgItem[] = []
+  for (let i = 0; i < messages.value.length; i++) {
+    if (!messages.value[i].read) {
+      unread.push(messages.value[i])
+    }
+  }
+  if (unread.length == 0) {
+    uni.showToast({ title: '暂无未读消息', icon: 'none' })
+    return
+  }
+  let done = 0
+  for (let i = 0; i < unread.length; i++) {
+    http('PUT', apiUrlMessageRead(unread[i].id), null, (ok, res, msg) => {
+      done++
+      if (done == unread.length) {
+        msgPageNum = 1
+        hasMoreMessages = true
+        loadMessages(false)
+        uni.showToast({ title: '已提交已读标记', icon: 'none' })
+      }
+    })
+  }
+}
+
+function loadCounts() {
+  http('GET', API_FLOW_TASK_COUNT, null, (ok, res, msg) => {
+    if (!ok) {
+      return
+    }
+    const data = res?.getJSON('data')
+    todoCount.value = countOf(data, 'todo')
+    doneCount.value = countOf(data, 'done')
+    startCount.value = countOf(data, 'start')
+  })
+}
+
+/**
+ * 统一列表：待办任务（流程查询接口）+ 审批/工单消息（WORKFLOW）按时间混排，
+ * 点击跳转各自的处理页（PC detailUrl）
+ */
+function loadUnified() {
+  unifiedLoading.value = true
+  let tasks: UnifiedItem[] = []
+  let msgs: UnifiedItem[] = []
+  let doneCount2 = 0
+  http('POST', API_FLOW_TODO_LIST, {
+    pageNum: 1,
+    pageSize: 20
+  }, (ok1, res1, msg1) => {
+    if (ok1) {
+      const list = tableList(res1)
+      if (list != null) {
+        for (let i = 0; i < list.length; i++) {
+          const item = list[i] as UTSJSONObject
+          const nodeName = item.getString('nodeName') ?? ''
+          let flowName = item.getString('flowName') ?? ''
+          if (flowName == '') {
+            flowName = nodeName != '' ? nodeName : '流程任务'
+          }
+          const sortKey = item.getString('createTime') ?? ''
+          const one: UnifiedItem = {
+            key: 't-' + (item.getString('id') ?? ''),
+            kind: 'task',
+            id: item.getString('id') ?? '',
+            title: flowName,
+            sub: nodeName == flowName ? '' : nodeName,
+            tag: '待办',
+            timeText: formatTime(sortKey),
+            sortKey: sortKey,
+            detailUrl: '/flow/todo',
+            formPath: item.getString('formPath') ?? '',
+            flowCode: item.getString('flowCode') ?? '',
+            nodeCode: item.getString('nodeCode') ?? '',
+            businessId: item.getString('businessId') ?? '',
+            read: false
+          }
+          tasks.push(one)
+        }
+      }
+    }
+    doneCount2++
+    if (doneCount2 == 2) {
+      mergeUnified(tasks, msgs)
+    }
+  })
+  http('POST', API_USER_MESSAGE_LIST, {
+    pageNum: 1,
+    pageSize: 20,
+    messageType: 'WORKFLOW'
+  }, (ok2, res2, msg2) => {
+    if (ok2) {
+      const list = tableList(res2)
+      if (list != null) {
+        for (let i = 0; i < list.length; i++) {
+          const item = list[i] as UTSJSONObject
+          const mainTitle = item.getString('mainTitle') ?? ''
+          const sortKey = item.getString('createdTime') ?? ''
+          const one: UnifiedItem = {
+            key: 'm-' + (item.getString('id') ?? ''),
+            kind: 'msg',
+            id: item.getString('id') ?? '',
+            title: mainTitle,
+            sub: item.getString('content') ?? '',
+            tag: taskTagOf(mainTitle),
+            timeText: formatTime(sortKey),
+            sortKey: sortKey,
+            detailUrl: item.getString('detailUrl') ?? '',
+            formPath: '',
+            flowCode: '',
+            nodeCode: '',
+            businessId: '',
+            read: item.getString('readStatus') == '1'
+          }
+          msgs.push(one)
+        }
+      }
+    }
+    doneCount2++
+    if (doneCount2 == 2) {
+      mergeUnified(tasks, msgs)
+    }
+  })
+}
+
+function mergeUnified(tasks: UnifiedItem[], msgs: UnifiedItem[]) {
+  const all: UnifiedItem[] = []
+  for (let i = 0; i < tasks.length; i++) {
+    all.push(tasks[i])
+  }
+  for (let i = 0; i < msgs.length; i++) {
+    all.push(msgs[i])
+  }
+  // sortKey（ISO 时间字符串）降序：字典序即时间序
+  for (let i = 0; i < all.length; i++) {
+    for (let j = 0; j < all.length - 1 - i; j++) {
+      if (all[j].sortKey < all[j + 1].sortKey) {
+        const tmp = all[j]
+        all[j] = all[j + 1]
+        all[j + 1] = tmp
+      }
+    }
+  }
+  unified.value = all
+  unifiedLoading.value = false
+}
+
+function openPcPage(path: string, title: string) {
+  // A2 握手：URL 只带一次性行权码，token 不再进 URL（访问日志/Referer/历史）
+  openPcWithHandshake(path, 'SYSTEM', (url: string) => {
+    uni.navigateTo({
+      url: '/pages/webview/webview?url=' + encodeURIComponent(url) + '&title=' + encodeURIComponent(title)
+    })
+  })
+}
+
+function unifiedTap(item: UnifiedItem) {
+  if (item.kind == 'msg') {
+    // 消息条目：标记已读并跳转对应处理页（detailUrl 为空时展示正文）
+    if (!item.read) {
+      http('PUT', apiUrlMessageRead(item.id), null, (ok, res, msg) => {
+        if (ok) {
+          item.read = true
+          const result: UnifiedItem[] = []
+          for (let i = 0; i < unified.value.length; i++) {
+            result.push(unified.value[i])
+          }
+          unified.value = result
+        }
+      })
+    }
+    if (item.detailUrl != '') {
+      // detailUrl 指向业务表单（/builder/{tableCode}）时进 APP 原生渲染页；
+      // 其余路径（/flow/todo、/flow/instance 等流程汇总页）仍由 PC 承载
+      let path = item.detailUrl
+      if (path.indexOf('/flow/todo') == 0 && path.indexOf('?') < 0) {
+        const bid = extractBusinessId(item.sub)
+        if (bid != '') {
+          path = path + '?businessId=' + bid
+        }
+      }
+      const builderCode = builderCodeOf(path)
+      if (builderCode != '') {
+        const bid = extractBusinessId(item.sub)
+        uni.navigateTo({
+          url: '/pages/dynform/dynform?code=' + builderCode + '&title=' + encodeURIComponent(item.title) +
+            '&businessId=' + bid + '&findTask=1'
+        })
+        return
+      }
+      openPcPage(path, item.title)
+      return
+    }
+    uni.showModal({
+      title: item.title,
+      content: item.sub != '' ? item.sub : '暂无内容',
+      showCancel: false,
+      confirmText: '确定'
+    })
+    return
+  }
+  // 待办任务条目：任务自带 formPath（表单编码）→ 原生业务 form 详情+审批；无绑定时回退 PC 流程页
+  if (item.formPath != '') {
+    uni.navigateTo({
+      url: '/pages/dynform/dynform?code=' + item.formPath + '&title=' + encodeURIComponent(item.title) +
+        '&businessId=' + item.businessId + '&taskId=' + item.id +
+        '&flowCode=' + item.flowCode + '&nodeCode=' + item.nodeCode
+    })
+    return
+  }
+  openPcPage(item.detailUrl, '待办任务')
+}
+
+/** /builder/{tableCode} 形态的路径提取表单编码（供原生渲染页使用） */
+function builderCodeOf(path: string): string {
+  const marker = '/builder/'
+  const idx = path.indexOf(marker)
+  if (idx < 0) {
+    return ''
+  }
+  let rest = path.substring(idx + marker.length)
+  const q = rest.indexOf('?')
+  if (q >= 0) {
+    rest = rest.substring(0, q)
+  }
+  const segs = rest.split('/')
+  for (let i = 0; i < segs.length; i++) {
+    if (segs[i] != '') {
+      return segs[i]
+    }
+  }
+  return ''
+}
+
+/** 从消息正文提取单据编号（"单据编号 xxxx"后的连续字母数字段） */
+function extractBusinessId(content: string): string {
+  const marker = '单据编号 '
+  const idx = content.indexOf(marker)
+  if (idx < 0) {
+    return ''
+  }
+  let out = ''
+  const start = idx + marker.length
+  for (let i = start; i < content.length; i++) {
+    const c = content.charCodeAt(i)
+    const isAlnum = (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122)
+    if (isAlnum) {
+      out += content.charAt(i)
+    } else {
+      break
+    }
+  }
+  return out
+}
+</script>
+
+<style>
+.page {
+	flex: 1;
+	background-color: #f4f6fa;
+}
+
+.seg {
+	flex-direction: row;
+	background-color: #ffffff;
+	padding: 8px 16px;
+}
+
+.seg-item {
+	flex: 1;
+	align-items: center;
+	padding: 8px 0;
+	border-radius: 8px;
+	flex-direction: row;
+	justify-content: center;
+}
+
+.seg-active {
+	background-color: #eef4ff;
+}
+
+.seg-text {
+	font-size: 14px;
+	color: #4b5563;
+}
+
+.seg-text-active {
+	color: #2f6bff;
+	font-weight: 600;
+}
+
+.badge {
+	margin-left: 6px;
+	background-color: #f53f3f;
+	border-radius: 9px;
+	padding: 0 6px;
+	height: 18px;
+	justify-content: center;
+}
+
+.badge-text {
+	color: #ffffff;
+	font-size: 11px;
+}
+
+.body {
+	flex: 1;
+}
+
+.toolbar {
+	flex-direction: row;
+	justify-content: flex-end;
+	padding: 10px 16px 0 16px;
+}
+
+.toolbar-btn {
+	font-size: 13px;
+	color: #2f6bff;
+}
+
+.msg-card {
+	margin: 10px 16px 0 16px;
+	background-color: #ffffff;
+	border-radius: 12px;
+	padding: 14px 16px;
+}
+
+.task-card {
+	margin: 10px 16px 0 16px;
+	background-color: #ffffff;
+	border-radius: 12px;
+	padding: 14px 16px;
+}
+
+.msg-head {
+	flex-direction: row;
+	align-items: center;
+}
+
+.msg-title {
+	flex: 1;
+	font-size: 15px;
+	font-weight: 600;
+	color: #1f2733;
+}
+
+.dot {
+	width: 8px;
+	height: 8px;
+	border-radius: 4px;
+	background-color: #f53f3f;
+	margin-left: 8px;
+}
+
+.msg-sub {
+	margin-top: 6px;
+	font-size: 13px;
+	color: #6b7484;
+}
+
+.msg-foot {
+	margin-top: 8px;
+	flex-direction: row;
+	align-items: center;
+}
+
+.msg-type {
+	font-size: 11px;
+	color: #2f6bff;
+	background-color: #eef4ff;
+	border-radius: 4px;
+	padding: 2px 6px;
+	margin-right: 8px;
+}
+
+.tag-todo {
+	color: #ea580c;
+	background-color: #fff7ed;
+}
+
+.msg-sender {
+	flex: 1;
+	font-size: 12px;
+	color: #a2aab8;
+	text-align: right;
+}
+
+.count-row {
+	flex-direction: row;
+	padding: 14px 16px 0 16px;
+}
+
+.count-card {
+	flex: 1;
+	background-color: #ffffff;
+	border-radius: 12px;
+	align-items: center;
+	padding: 14px 0;
+	margin: 0 4px;
+}
+
+.count-num {
+	font-size: 22px;
+	font-weight: 700;
+	color: #1f2733;
+}
+
+.count-label {
+	margin-top: 4px;
+	font-size: 12px;
+	color: #9098a8;
+}
+
+.empty {
+	padding: 60px 40px;
+	align-items: center;
+}
+
+.empty-text {
+	font-size: 14px;
+	color: #a2aab8;
+}
+
+.loading {
+	padding: 16px;
+	align-items: center;
+}
+
+.loading-text {
+	font-size: 13px;
+	color: #a2aab8;
+}
+</style>

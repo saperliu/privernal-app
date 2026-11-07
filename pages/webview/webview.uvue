@@ -1,0 +1,51 @@
+<template>
+	<view class="page">
+		<web-view :src="url" @error="onError"></web-view>
+	</view>
+</template>
+
+<script setup lang="uts">
+import { getPcUrl, originOf } from '@/utils/store'
+
+const url = ref('')
+
+onLoad((query) => {
+  const urlRaw = query?.url as string | null
+  if (urlRaw != null) {
+    const decodedUrl = decodeURIComponent(urlRaw)
+    if (decodedUrl != null) {
+      // A1：web-view 只允许加载 PC 端同源页面——url 参数来自消息/应用跳转的拼接，
+      // 不设白名单等于任意远程内容进入应用内 web-view（可携带本页 query 上下文）
+      const allowedPc = originOf(getPcUrl())
+      if (originOf(decodedUrl) != allowedPc) {
+        uni.showToast({ title: '仅支持打开平台页面', icon: 'none' })
+        return
+      }
+      url.value = decodedUrl
+    }
+  }
+  const titleRaw = query?.title as string | null
+  if (titleRaw != null) {
+    const decodedTitle = decodeURIComponent(titleRaw)
+    if (decodedTitle != null && decodedTitle.length > 0) {
+      uni.setNavigationBarTitle({ title: decodedTitle })
+    }
+  }
+})
+
+function onError() {
+  // 加载失败大概率是 PC 端地址配置不对；只展示 origin，不带 query（A1：query 可能含 token）
+  uni.showModal({
+    title: '页面加载失败',
+    content: '地址：' + originOf(url.value) + '。请检查登录页「高级设置」中的 PC 端页面地址，或联系管理员。',
+    showCancel: false
+  })
+}
+</script>
+
+<style>
+.page {
+	flex: 1;
+	background-color: #ffffff;
+}
+</style>

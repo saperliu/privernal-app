@@ -1,0 +1,514 @@
+<template>
+	<view class="page">
+		<!-- 搜索框 -->
+		<view class="search-bar" v-if="searchOn">
+			<input class="search-input" :value="searchValue" :placeholder="'按' + searchLabel + '搜索'"
+				placeholder-style="color:#c0c6d2" @input="onSearchInput" @confirm="doSearch" />
+			<text class="search-btn" @click="doSearch">搜索</text>
+		</view>
+
+		<scroll-view scroll-y class="list-body" @scrolltolower="loadMore">
+			<view class="list-header">
+				<text class="list-count">共 {{total}} 条</text>
+			</view>
+
+			<!-- 树模式（部门管理） -->
+			<view class="tree" v-if="treeMode">
+				<view class="tree-node" v-for="(node, nIdx) in treeNodes" :key="nIdx"
+					:style="'padding-left:' + (14 + node.level * 18) + 'px'" @click="toggleNode(nIdx)">
+					<text class="tree-toggle">{{node.childCount > 0 ? (node.expanded ? '▾' : '▸') : '·'}}</text>
+					<text class="tree-name">{{node.name}}</text>
+				</view>
+			</view>
+
+			<!-- 卡片模式 -->
+			<view class="card" v-for="(card, index) in cards" :key="card.id" v-if="!treeMode">
+				<text class="card-main">{{card.main}}</text>
+				<view class="card-sub-row" v-for="(sub, sIndex) in card.subs" :key="sIndex">
+					<text class="card-sub-label">{{sub.label}}：</text>
+					<text class="card-sub-value">{{sub.value}}</text>
+				</view>
+			</view>
+
+			<view class="empty" v-if="!loading && cards.length == 0 && treeNodes.length == 0">
+				<text class="empty-text">暂无数据</text>
+			</view>
+			<view class="loading" v-if="loading">
+				<text class="loading-text">加载中…</text>
+			</view>
+			<view class="loading" v-else-if="!treeMode && cards.length > 0 && !hasMore">
+				<text class="loading-text">没有更多了</text>
+			</view>
+			<view class="bottom-space"></view>
+		</scroll-view>
+	</view>
+</template>
+
+<script setup lang="uts">
+/**
+ * 管理端原生配置化列表页：
+ * 系统管理/平台管理的固定管理页面，按 page 参数加载对应配置，
+ * 渲染为移动端卡片列表（或部门简版树）。管理操作（新增/编辑）在 PC 端完成。
+ */
+import { http, tableList, tableTotal } from '@/utils/http.uts'
+import { anyToString } from '@/renderer/schema.uts'
+
+type AdminField = {
+  key: string
+  label: string
+}
+
+type AdminPageConfig = {
+  api: string
+  mainField: string
+  fields: AdminField[]
+  searchLabel: string
+  searchKey: string
+  treeMode: boolean
+}
+
+type CardSub = { label: string, value: string }
+type CardItem = { id: string, main: string, subs: CardSub[] }
+type TreeNode = {
+  id: string
+  name: string
+  level: number
+  childCount: number
+  expanded: boolean
+}
+
+const cards = ref<CardItem[]>([])
+const treeNodes = ref<TreeNode[]>([])
+const loading = ref(false)
+const total = ref(0)
+const hasMore = ref(false)
+const searchOn = ref(false)
+const searchLabel = ref('')
+const searchValue = ref('')
+const treeMode = ref(false)
+
+let config: AdminPageConfig | null = null
+let pageNum = 1
+const pageSize = 15
+let rawDeptRows: Array<any> = []
+let collapsedIds: string[] = []
+
+const STATUS_LABELS = new Map<string, string>([
+  ['1', '正常'], ['0', '停用']
+])
+const LOG_STATUS = new Map<string, string>([
+  ['1', '成功'], ['0', '失败']
+])
+
+function pageConfigOf(page: string): AdminPageConfig | null {
+  if (page == 'user') {
+    const fields: AdminField[] = [
+      { key: 'loginName', label: '账号' },
+      { key: 'phone', label: '手机号' },
+      { key: 'status', label: '状态' }
+    ]
+    const c: AdminPageConfig = {
+      api: '/back/system/user/list',
+      mainField: 'nickName',
+      fields: fields,
+      searchLabel: '账号',
+      searchKey: 'loginName',
+      treeMode: false
+    }
+    return c
+  }
+  if (page == 'role') {
+    const fields: AdminField[] = [
+      { key: 'roleKey', label: '权限字符' },
+      { key: 'status', label: '状态' },
+      { key: 'remark', label: '备注' }
+    ]
+    const c: AdminPageConfig = {
+      api: '/back/system/role/list/dto',
+      mainField: 'roleName',
+      fields: fields,
+      searchLabel: '角色名称',
+      searchKey: 'roleName',
+      treeMode: false
+    }
+    return c
+  }
+  if (page == 'loginlog') {
+    const fields: AdminField[] = [
+      { key: 'loginIp', label: '登录IP' },
+      { key: 'browser', label: '终端' },
+      { key: 'status', label: '结果' },
+      { key: 'createdTime', label: '时间' }
+    ]
+    const c: AdminPageConfig = {
+      api: '/back/message/systemLogLogin/list',
+      mainField: 'loginName',
+      fields: fields,
+      searchLabel: '登录账号',
+      searchKey: 'loginName',
+      treeMode: false
+    }
+    return c
+  }
+  if (page == 'operationlog') {
+    const fields: AdminField[] = [
+      { key: 'operIp', label: '操作IP' },
+      { key: 'status', label: '结果' },
+      { key: 'createdTime', label: '时间' }
+    ]
+    const c: AdminPageConfig = {
+      api: '/back/message/systemLogOperation/list',
+      mainField: 'title',
+      fields: fields,
+      searchLabel: '模块',
+      searchKey: 'title',
+      treeMode: false
+    }
+    return c
+  }
+  if (page == 'dept') {
+    const c: AdminPageConfig = {
+      api: '/back/system/department/tree',
+      mainField: 'deptName',
+      fields: [],
+      searchLabel: '',
+      searchKey: '',
+      treeMode: true
+    }
+    return c
+  }
+  return null
+}
+
+function cellValue(row: UTSJSONObject, key: string): string {
+  const raw = row[key]
+  if (raw == null) {
+    return ''
+  }
+  const text = typeof raw == 'string' ? (raw as string) : (typeof raw == 'number' ? (raw as number).toString() : '')
+  if (key == 'status') {
+    const isLog = config != null && config!.api.indexOf('systemLog') >= 0
+    const m = isLog ? LOG_STATUS : STATUS_LABELS
+    const label = m.get(text)
+    return label != null ? label : text
+  }
+  if (text.length >= 16 && text.charAt(4) == '-' && text.charAt(7) == '-') {
+    return text.substring(0, 16)
+  }
+  return text
+}
+
+onLoad((query) => {
+  const pageRaw = query?.page as string | null
+  const page = pageRaw ?? ''
+  const titleRaw = query?.title as string | null
+  if (titleRaw != null) {
+    const decoded = decodeURIComponent(titleRaw)
+    if (decoded != null && decoded.length > 0) {
+      uni.setNavigationBarTitle({ title: decoded })
+    }
+  }
+  config = pageConfigOf(page)
+  if (config == null) {
+    uni.showToast({ title: '未知页面类型', icon: 'none' })
+    return
+  }
+  treeMode.value = config!.treeMode
+  if (config!.searchKey != '') {
+    searchOn.value = true
+    searchLabel.value = config!.searchLabel
+  }
+  if (config!.treeMode) {
+    loading.value = true
+    http('POST', config!.api, {}, (ok, res, msg) => {
+      loading.value = false
+      if (!ok) {
+        uni.showToast({ title: msg, icon: 'none' })
+        return
+      }
+      // tree 接口返回单根（系统企业），取其 children 为顶层部门树
+      const root = res?.getJSON('data')
+      const kids = root?.getArray('children')
+      rawDeptRows = kids != null ? kids : []
+      let count = rawDeptRows.length
+      for (let i = 0; i < rawDeptRows.length; i++) {
+        const sub = (rawDeptRows[i] as UTSJSONObject).getArray('children')
+        count += sub == null ? 0 : sub.length
+      }
+      total.value = count
+      treeNodes.value = buildTree(rawDeptRows, collapsedIds)
+    })
+    return
+  }
+  refresh()
+})
+
+function onSearchInput(e: UniInputEvent) {
+  searchValue.value = e.detail.value
+}
+
+/** 重新查询第一页 */
+function refresh() {
+  pageNum = 1
+  loadRows(false)
+}
+
+function doSearch() {
+  refresh()
+}
+
+function loadMore() {
+  if (loading.value || treeMode.value || !hasMore.value) {
+    return
+  }
+  pageNum++
+  loadRows(true)
+}
+
+/** 搜索体：FilterDTO 的 keywords 数组（登录日志按字段等值） */
+function buildBody(): UTSJSONObject {
+  const body = {
+    pageNum: pageNum,
+    pageSize: pageSize
+  } as UTSJSONObject
+  const c = config!
+  if (c.searchKey != '' && searchValue.value != '') {
+    if (c.api.indexOf('systemLog') >= 0) {
+      body.set(c.searchKey, searchValue.value)
+    } else {
+      const kw: string[] = [searchValue.value]
+      body.set('keywords', kw)
+    }
+  }
+  return body
+}
+
+function loadRows(append: boolean) {
+  const c = config
+  if (c == null) {
+    return
+  }
+  loading.value = true
+  http('POST', c.api, buildBody(), (ok, res, msg) => {
+    loading.value = false
+    if (!ok) {
+      uni.showToast({ title: msg, icon: 'none' })
+      return
+    }
+    const list = tableList(res)
+    total.value = tableTotal(res)
+    const result: CardItem[] = append ? cards.value : []
+    if (list != null) {
+      for (let i = 0; i < list.length; i++) {
+        const row = list[i] as UTSJSONObject
+        const idRaw = row['id']
+        const id = idRaw == null ? '' : anyToString(idRaw)
+        const subs: CardSub[] = []
+        for (let j = 0; j < c.fields.length && subs.length < 4; j++) {
+          const f = c.fields[j]
+          const value = cellValue(row, f.key)
+          if (value != '') {
+            const sub: CardSub = { label: f.label, value: value }
+            subs.push(sub)
+          }
+        }
+        const mainRaw = row[c.mainField]
+        const main = mainRaw == null ? id : (typeof mainRaw == 'string' ? (mainRaw as string) : id)
+        const card: CardItem = { id: id, main: main == '' ? id : main, subs: subs }
+        result.push(card)
+      }
+    }
+    cards.value = result
+    hasMore.value = result.length < total.value
+  })
+}
+
+/** 部门树：后端返回带 children 的树，扁平化为缩进节点（点节点收起/展开子级）；
+ * collapsed 收起集合走参数传入——UTS web 编译对模块级可变变量的闭包读取存在快照缺陷 */
+function buildTree(rows: Array<any>, collapsed: string[]): TreeNode[] {
+  const nodes: TreeNode[] = []
+  const walk = function (children: Array<any>, level: number) {
+    for (let i = 0; i < children.length; i++) {
+      const raw = children[i] as UTSJSONObject
+      const kids = raw.getArray('children')
+      const idRaw = raw['id']
+      const id = idRaw == null ? '' : anyToString(idRaw)
+      let isCollapsed = false
+      for (let ci = 0; ci < collapsed.length; ci++) {
+        if (collapsed[ci] == id) {
+          isCollapsed = true
+          break
+        }
+      }
+      const node: TreeNode = {
+        id: id,
+        name: (raw['deptName'] as string | null) ?? '',
+        level: level,
+        childCount: kids == null ? 0 : kids.length,
+        expanded: !isCollapsed
+      }
+      nodes.push(node)
+      if (kids != null && !isCollapsed) {
+        walk(kids, level + 1)
+      }
+    }
+  }
+  walk(rows, 0)
+  return nodes
+}
+
+/** 收起/展开：传 v-for 下标（模板字符串事件参数会被编译层损坏，函数内自行取 id） */
+function toggleNode(index: number) {
+  if (index < 0 || index >= treeNodes.value.length) {
+    return
+  }
+  const nodeId = treeNodes.value[index].id
+  if (nodeId == '') {
+    return
+  }
+  let wasCollapsed = false
+  for (let ci = 0; ci < collapsedIds.length; ci++) {
+    if (collapsedIds[ci] == nodeId) {
+      wasCollapsed = true
+      break
+    }
+  }
+  if (wasCollapsed) {
+    const kept: string[] = []
+    for (let i = 0; i < collapsedIds.length; i++) {
+      if (collapsedIds[i] != nodeId) {
+        kept.push(collapsedIds[i])
+      }
+    }
+    collapsedIds = kept
+  } else {
+    collapsedIds.push(nodeId)
+  }
+  const rebuilt = buildTree(rawDeptRows, collapsedIds)
+  treeNodes.value.splice(0, treeNodes.value.length)
+  for (let i = 0; i < rebuilt.length; i++) {
+    treeNodes.value.push(rebuilt[i])
+  }
+}
+</script>
+
+<style>
+.page {
+	flex: 1;
+	background-color: #f4f6fa;
+}
+
+.search-bar {
+	flex-direction: row;
+	align-items: center;
+	background-color: #ffffff;
+	padding: 8px 16px;
+}
+
+.search-input {
+	flex: 1;
+	height: 34px;
+	padding: 0 10px;
+	border-radius: 17px;
+	background-color: #f4f6fa;
+	font-size: 13px;
+}
+
+.search-btn {
+	margin-left: 10px;
+	font-size: 14px;
+	color: #2f6bff;
+}
+
+.list-body {
+	flex: 1;
+}
+
+.list-header {
+	padding: 10px 16px 4px 16px;
+}
+
+.list-count {
+	font-size: 12px;
+	color: #9098a8;
+}
+
+.card {
+	margin: 10px 16px 0 16px;
+	background-color: #ffffff;
+	border-radius: 12px;
+	padding: 14px 16px;
+}
+
+.card-main {
+	font-size: 16px;
+	font-weight: 600;
+	color: #1f2733;
+}
+
+.card-sub-row {
+	margin-top: 8px;
+	flex-direction: row;
+}
+
+.card-sub-label {
+	font-size: 12px;
+	color: #9098a8;
+}
+
+.card-sub-value {
+	flex: 1;
+	font-size: 12px;
+	color: #4b5563;
+	text-align: right;
+}
+
+.tree {
+	margin: 10px 16px 0 16px;
+	background-color: #ffffff;
+	border-radius: 12px;
+	padding: 8px 0;
+}
+
+.tree-node {
+	flex-direction: row;
+	align-items: center;
+	padding: 10px 8px;
+}
+
+.tree-toggle {
+	width: 18px;
+	font-size: 12px;
+	color: #9098a8;
+	text-align: center;
+}
+
+.tree-name {
+	font-size: 14px;
+	color: #1f2733;
+}
+
+.empty {
+	padding: 80px 40px;
+	align-items: center;
+}
+
+.empty-text {
+	font-size: 14px;
+	color: #a2aab8;
+}
+
+.loading {
+	padding: 16px;
+	align-items: center;
+}
+
+.loading-text {
+	font-size: 13px;
+	color: #a2aab8;
+}
+
+.bottom-space {
+	height: 20px;
+}
+</style>

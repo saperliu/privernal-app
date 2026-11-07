@@ -1,0 +1,162 @@
+/**
+ * 后端请求封装 + 平台接口定义。
+ *
+ * 后端为单体服务，登录直连；响应有两种包裹：
+ * - CommonResult：{ code, message, data }，code == 200 视为成功；
+ * - TableResult：{ code, message, data: { total, list } }，分页列表用。
+ * 令牌过期（code == 401）时清空登录态并回到登录页。
+ */
+import { getBaseUrl, getToken, clearToken, clearUserInfo, getPcUrl } from './store.uts'
+
+export type HttpDone = (ok: boolean, res: UTSJSONObject | null, msg: string) => void
+
+function unauthorized() {
+  clearToken()
+  clearUserInfo()
+  uni.reLaunch({
+    url: '/pages/login/login'
+  })
+}
+
+export function http(method: string, path: string, data: UTSJSONObject | null, done: HttpDone) {
+  const token = getToken()
+  const header = token == ''
+    ? { 'Content-Type': 'application/json' }
+    : { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token }
+  uni.request({
+    url: getBaseUrl() + path,
+    method: method as RequestMethod,
+    data: data,
+    header: header,
+    timeout: 20000,
+    success: (res) => {
+      const obj = res.data as UTSJSONObject | null
+      if (res.statusCode != 200 || obj == null) {
+        done(false, null, '服务响应异常（HTTP ' + res.statusCode + '）')
+        return
+      }
+      const code = obj.getNumber('code')
+      if (code == 401) {
+        unauthorized()
+        done(false, obj, '登录已过期，请重新登录')
+        return
+      }
+      if (code != 200) {
+        const message = obj.getString('message')
+        done(false, obj, message == null ? '请求失败' : message)
+        return
+      }
+      done(true, obj, '')
+    },
+    fail: (err) => {
+      done(false, null, err.errMsg)
+    }
+  })
+}
+
+/** 从 TableResult 的 data 中取 list 数组 */
+export function tableList(res: UTSJSONObject | null): Array<any> | null {
+  const data = res?.getJSON('data')
+  return data?.getArray('list')
+}
+
+/** 从 TableResult 的 data 中取 total（后端 Long→String 序列化会返回字符串数字，两种口径都兜） */
+export function tableTotal(res: UTSJSONObject | null): number {
+  const data = res?.getJSON('data')
+  if (data == null) {
+    return 0
+  }
+  const asNum = data.getNumber('total')
+  if (asNum != null) {
+    return asNum
+  }
+  const asStr = data.getString('total')
+  if (asStr != null && asStr.length > 0) {
+    return parseInt(asStr)
+  }
+  return 0
+}
+
+// ---------------- 接口路径 ----------------
+
+// F4 登录挑战签发：一次性 nonce（60 秒/单次）+ 迁移标志；服务端未配主密钥时 enabled=false
+export function apiLoginChallenge(loginName: string, done: HttpDone) {
+  http('GET', '/auth/login/challenge', {
+    loginName: loginName
+  }, done)
+}
+
+// 登录（loginType 1 = APP 端，多组织时不走 PC 的临时令牌选择流程）。
+// F4：nonceId 非空时 password 传 SHA512(nonce+线摘要)（挑战口径），否则传线摘要 SHA512(明文)
+export function apiLogin(loginName: string, passwordValue: string, nonceId: string | null, done: HttpDone) {
+  const body: UTSJSONObject = nonceId == null || nonceId.length == 0
+    ? {
+        loginName: loginName,
+        password: passwordValue,
+        loginType: 1
+      }
+    : {
+        loginName: loginName,
+        password: passwordValue,
+        loginType: 1,
+        nonceId: nonceId
+      }
+  http('POST', '/auth/login', body, done)
+}
+
+/**
+ * A2：APP→PC web-view 令牌握手。先凭登录态向后端换一次性行权码（60 秒/单次），
+ * 再带 ek 打开 PC 页面；token 本体永不出现在 URL（访问日志/Referer/历史）。
+ * 握手失败时回调不带凭证的地址，由 PC 端自行走登录引导
+ */
+export function openPcWithHandshake(path: string, appCode: string, done: (url: string) => void) {
+  http('POST', '/auth/web/handshake', null, (ok, res, msg) => {
+    const ek = res?.getString('data') ?? ''
+    const sep = path.indexOf('?') >= 0 ? '&' : '?'
+    if (!ok || ek == '') {
+      done(getPcUrl() + path + sep + 'bare=1&app=' + appCode)
+      return
+    }
+    done(getPcUrl() + path + sep + 'bare=1&app=' + appCode + '&ek=' + ek)
+  })
+}
+
+// 当前用户信息（登录后刷新会话权限必须调用一次）
+export const API_GET_INFO = '/back/system/user/getInfo'
+
+// 首页应用列表（按当前用户授权过滤）
+export const API_APP_LIST = '/back/system/appInfo/app/list'
+
+// 按应用取菜单路由树
+export function apiUrlAppRouters(appId: string, appCode: string): string {
+  return '/back/system/menu/app/getRouters?id=' + appId + '&code=' + appCode
+}
+
+// 用户消息（APP 专用）
+export const API_USER_MESSAGE_LIST = '/app/system/systemMessage/user/list'
+export function apiUrlMessageRead(messageId: string): string {
+  return '/app/system/systemMessage/user/read/' + messageId
+}
+export const API_MESSAGE_READ_ALL = '/app/system/systemMessage/user/readAll'
+
+// 流程任务
+export const API_FLOW_TODO_LIST = '/back/flow/task/todo/list'
+export const API_FLOW_DONE_LIST = '/back/flow/task/done/list'
+export const API_FLOW_MY_LIST = '/back/flow/instance/my/list'
+export const API_FLOW_TASK_COUNT = '/back/flow/task/count'
+export const API_FLOW_APPROVE = '/back/flow/task/approve'
+export const API_FLOW_REJECT = '/back/flow/task/reject'
+export function apiUrlFormVersionList(flowCode: string): string {
+  return '/back/flow/form/version/list?flowCode=' + flowCode
+}
+export function apiUrlFormVersionDetail(id: string): string {
+  return '/back/flow/form/version/' + id
+}
+
+// 修改密码（旧/新密码均传 SHA512 摘要）
+export const API_UPDATE_PWD = '/back/system/user/manual/updatePwd'
+
+// 退出登录
+export const API_LOGOUT = '/auth/logout'
+// 注销账号（删除账号及相关数据，不可恢复）
+export const API_ACCOUNT_CANCEL = '/auth/account/cancel'

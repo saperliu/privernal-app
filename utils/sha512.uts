@@ -1,0 +1,290 @@
+/**
+ * 纯 UTS 实现的 SHA-512 摘要（登录密码需要 SHA512 十六进制摘要，与 PC 端口径一致）。
+ *
+ * 实现说明：为兼容 App 端（Kotlin/Swift 无 JS 位运算语义保证），
+ * 全部按 32 位无符号数（number，值域 [0, 2^32)）运算：
+ * - 与/或/异或用逐位循环实现，移位用乘除 2 的幂实现，均为 float64 精确运算；
+ * - 64 位字以 (hi, lo) 一对 number 表示；
+ * - 常量取自 FIPS 180-4（十进制展开）。
+ */
+
+const POW2_32 = 4294967296
+const U32_MAX = 4294967295
+
+const KH: number[] = [1116352408, 1899447441, 3049323471, 3921009573, 961987163, 1508970993, 2453635748, 2870763221, 3624381080, 310598401, 607225278, 1426881987, 1925078388, 2162078206, 2614888103, 3248222580, 3835390401, 4022224774, 264347078, 604807628, 770255983, 1249150122, 1555081692, 1996064986, 2554220882, 2821834349, 2952996808, 3210313671, 3336571891, 3584528711, 113926993, 338241895, 666307205, 773529912, 1294757372, 1396182291, 1695183700, 1986661051, 2177026350, 2456956037, 2730485921, 2820302411, 3259730800, 3345764771, 3516065817, 3600352804, 4094571909, 275423344, 430227734, 506948616, 659060556, 883997877, 958139571, 1322822218, 1537002063, 1747873779, 1955562222, 2024104815, 2227730452, 2361852424, 2428436474, 2756734187, 3204031479, 3329325298, 3391569614, 3515267271, 3940187606, 4118630271, 116418474, 174292421, 289380356, 460393269, 685471733, 852142971, 1017036298, 1126000580, 1288033470, 1501505948, 1607167915, 1816402316]
+
+const KL: number[] = [3609767458, 602891725, 3964484399, 2173295548, 4081628472, 3053834265, 2937671579, 3664609560, 2734883394, 1164996542, 1323610764, 3590304994, 4068182383, 991336113, 633803317, 3479774868, 2666613458, 944711139, 2341262773, 2007800933, 1495990901, 1856431235, 3175218132, 2198950837, 3999719339, 766784016, 2566594879, 3203337956, 1034457026, 2466948901, 3758326383, 168717936, 1188179964, 1546045734, 1522805485, 2643833823, 2343527390, 1014477480, 1206759142, 344077627, 1290863460, 3158454273, 3505952657, 106217008, 3606008344, 1432725776, 1467031594, 851169720, 3100823752, 1363258195, 3750685593, 3785050280, 3318307427, 3812723403, 2003034995, 3602036899, 1575990012, 1125592928, 2716904306, 442776044, 593698344, 3733110249, 2999351573, 3815920427, 3928383900, 566280711, 3454069534, 4000239992, 1914138554, 2731055270, 3203993006, 320620315, 587496836, 1086792851, 365543100, 2618297676, 3409855158, 4234509866, 987167468, 1246189591]
+
+const HH0: number[] = [1779033703, 3144134277, 1013904242, 2773480762, 1359893119, 2600822924, 528734635, 1541459225]
+
+const HL0: number[] = [4089235720, 2227873595, 4271175723, 1595750129, 2917565137, 725511199, 4215389547, 327033209]
+
+function pow2(n: number): number {
+  let r = 1
+  for (let i = 0; i < n; i++) {
+    r = r * 2
+  }
+  return r
+}
+
+function mod32(x: number): number {
+  return x % POW2_32
+}
+
+function shr32(x: number, n: number): number {
+  return Math.floor(x / pow2(n))
+}
+
+/** x 左移 n 位后取低 32 位（x、结果均为无符号数） */
+function shl32(x: number, n: number): number {
+  let r = 0
+  let v = x
+  for (let i = 0; i < 32; i++) {
+    if (v % 2 == 1) {
+      const j = i + n
+      if (j < 32) {
+        r = r + pow2(j)
+      }
+    }
+    v = Math.floor(v / 2)
+  }
+  return r
+}
+
+function and32(a: number, b: number): number {
+  let r = 0
+  let x = a
+  let y = b
+  let p = 1
+  for (let i = 0; i < 32; i++) {
+    if (x % 2 == 1 && y % 2 == 1) {
+      r = r + p
+    }
+    x = Math.floor(x / 2)
+    y = Math.floor(y / 2)
+    p = p * 2
+  }
+  return r
+}
+
+function xor32(a: number, b: number): number {
+  let r = 0
+  let x = a
+  let y = b
+  let p = 1
+  for (let i = 0; i < 32; i++) {
+    if (x % 2 != y % 2) {
+      r = r + p
+    }
+    x = Math.floor(x / 2)
+    y = Math.floor(y / 2)
+    p = p * 2
+  }
+  return r
+}
+
+function or32(a: number, b: number): number {
+  let r = 0
+  let x = a
+  let y = b
+  let p = 1
+  for (let i = 0; i < 32; i++) {
+    if (x % 2 == 1 || y % 2 == 1) {
+      r = r + p
+    }
+    x = Math.floor(x / 2)
+    y = Math.floor(y / 2)
+    p = p * 2
+  }
+  return r
+}
+
+function not32(a: number): number {
+  return U32_MAX - a
+}
+
+type W64 = { hi: number, lo: number }
+
+function w64(hi: number, lo: number): W64 {
+  const r: W64 = { hi: mod32(hi), lo: mod32(lo) }
+  return r
+}
+
+function xor64(a: W64, b: W64): W64 {
+  return w64(xor32(a.hi, b.hi), xor32(a.lo, b.lo))
+}
+
+function add64(a: W64, b: W64): W64 {
+  const loSum = a.lo + b.lo
+  const carry = loSum >= POW2_32 ? 1 : 0
+  return w64(a.hi + b.hi + carry, loSum)
+}
+
+/** 64 位逻辑左移（1 <= m <= 63） */
+function shl64(x: W64, m: number): W64 {
+  if (m < 32) {
+    return w64(shl32(x.hi, m) + shr32(x.lo, 32 - m), shl32(x.lo, m))
+  }
+  return w64(shl32(x.lo, m - 32), 0)
+}
+
+/** 64 位循环右移（1 <= n <= 63）= 右移 n 位 ∪ 左移 64-n 位 */
+function rotr64(x: W64, n: number): W64 {
+  const s = shr64(x, n)
+  const l = shl64(x, 64 - n)
+  return w64(or32(s.hi, l.hi), or32(s.lo, l.lo))
+}
+
+/** 64 位逻辑右移（1 <= n <= 63） */
+function shr64(x: W64, n: number): W64 {
+  const h = n < 32 ? shr32(x.hi, n) : 0
+  const l = n < 32
+    ? mod32(shl32(x.hi - shr32(x.hi, n) * pow2(n), 32 - n) + shr32(x.lo, n))
+    : shr32(x.hi, n - 32)
+  return w64(h, l)
+}
+
+function ch(e: W64, f: W64, g: W64): W64 {
+  return w64(
+    xor32(and32(e.hi, f.hi), and32(not32(e.hi), g.hi)),
+    xor32(and32(e.lo, f.lo), and32(not32(e.lo), g.lo))
+  )
+}
+
+function maj(a: W64, b: W64, c: W64): W64 {
+  return w64(
+    xor32(xor32(and32(a.hi, b.hi), and32(a.hi, c.hi)), and32(b.hi, c.hi)),
+    xor32(xor32(and32(a.lo, b.lo), and32(a.lo, c.lo)), and32(b.lo, c.lo))
+  )
+}
+
+/** 字符串 → UTF-8 字节序列 */
+function utf8Bytes(s: string): number[] {
+  const bytes: number[] = []
+  for (let i = 0; i < s.length; i++) {
+    const code = s.charCodeAt(i)
+    if (code < 0x80) {
+      bytes.push(code)
+    } else if (code < 0x800) {
+      bytes.push(0xC0 + Math.floor(code / 64))
+      bytes.push(0x80 + code % 64)
+    } else if (code >= 0xD800 && code <= 0xDBFF && i + 1 < s.length) {
+      // 代理对 → 4 字节
+      const low = s.charCodeAt(i + 1)
+      const cp = (code - 0xD800) * 1024 + (low - 0xDC00) + 0x10000
+      bytes.push(0xF0 + Math.floor(cp / 262144))
+      bytes.push(0x80 + Math.floor(cp / 4096) % 64)
+      bytes.push(0x80 + Math.floor(cp / 64) % 64)
+      bytes.push(0x80 + cp % 64)
+      i++
+    } else {
+      bytes.push(0xE0 + Math.floor(code / 4096))
+      bytes.push(0x80 + Math.floor(code / 64) % 64)
+      bytes.push(0x80 + code % 64)
+    }
+  }
+  return bytes
+}
+
+function toHex8(v: number): string {
+  let hex = ''
+  const digits = '0123456789abcdef'
+  let x = v
+  for (let i = 0; i < 8; i++) {
+    hex = digits.charAt(x % 16) + hex
+    x = Math.floor(x / 16)
+  }
+  return hex
+}
+
+/**
+ * 计算 SHA-512 摘要，返回 128 位小写十六进制字符串。
+ */
+export function sha512(input: string): string {
+  const msg = utf8Bytes(input)
+  // 填充：0x80 + 0* + 16 字节大端位长度
+  const bitLen = msg.length * 8
+  const padded: number[] = []
+  for (let i = 0; i < msg.length; i++) {
+    padded.push(msg[i])
+  }
+  padded.push(0x80)
+  while (padded.length % 128 != 112) {
+    padded.push(0)
+  }
+  // 128 位长度（高 8 字节这里恒为 0，口令长度远小于 2^32 位）
+  for (let i = 0; i < 8; i++) {
+    padded.push(0)
+  }
+  for (let shift = 56; shift >= 0; shift -= 8) {
+    padded.push(Math.floor(bitLen / pow2(shift)) % 256)
+  }
+
+  const hHi: number[] = []
+  const hLo: number[] = []
+  for (let i = 0; i < 8; i++) {
+    hHi.push(HH0[i])
+    hLo.push(HL0[i])
+  }
+
+  const wHi: number[] = []
+  const wLo: number[] = []
+  for (let i = 0; i < 80; i++) {
+    wHi.push(0)
+    wLo.push(0)
+  }
+
+  for (let block = 0; block < padded.length; block += 128) {
+    // 消息扩展
+    for (let t = 0; t < 16; t++) {
+      const off = block + t * 8
+      wHi[t] = padded[off] * 16777216 + padded[off + 1] * 65536 + padded[off + 2] * 256 + padded[off + 3]
+      wLo[t] = padded[off + 4] * 16777216 + padded[off + 5] * 65536 + padded[off + 6] * 256 + padded[off + 7]
+    }
+    for (let t = 16; t < 80; t++) {
+      const w15 = w64(wHi[t - 15], wLo[t - 15])
+      const w2 = w64(wHi[t - 2], wLo[t - 2])
+      const s0 = xor64(xor64(rotr64(w15, 1), rotr64(w15, 8)), shr64(w15, 7))
+      const s1 = xor64(xor64(rotr64(w2, 19), rotr64(w2, 61)), shr64(w2, 6))
+      const sum = add64(add64(w64(wHi[t - 16], wLo[t - 16]), s0), add64(w64(wHi[t - 7], wLo[t - 7]), s1))
+      wHi[t] = sum.hi
+      wLo[t] = sum.lo
+    }
+
+    let a = w64(hHi[0], hLo[0])
+    let b = w64(hHi[1], hLo[1])
+    let c = w64(hHi[2], hLo[2])
+    let d = w64(hHi[3], hLo[3])
+    let e = w64(hHi[4], hLo[4])
+    let f = w64(hHi[5], hLo[5])
+    let g = w64(hHi[6], hLo[6])
+    let h = w64(hHi[7], hLo[7])
+
+    for (let t = 0; t < 80; t++) {
+      const S1 = xor64(xor64(rotr64(e, 14), rotr64(e, 18)), rotr64(e, 41))
+      const temp1 = add64(add64(add64(add64(h, S1), ch(e, f, g)), w64(KH[t], KL[t])), w64(wHi[t], wLo[t]))
+      const S0 = xor64(xor64(rotr64(a, 28), rotr64(a, 34)), rotr64(a, 39))
+      const temp2 = add64(S0, maj(a, b, c))
+      h = g
+      g = f
+      f = e
+      e = add64(d, temp1)
+      d = c
+      c = b
+      b = a
+      a = add64(temp1, temp2)
+    }
+
+    const final = [add64(a, w64(hHi[0], hLo[0])), add64(b, w64(hHi[1], hLo[1])), add64(c, w64(hHi[2], hLo[2])), add64(d, w64(hHi[3], hLo[3])), add64(e, w64(hHi[4], hLo[4])), add64(f, w64(hHi[5], hLo[5])), add64(g, w64(hHi[6], hLo[6])), add64(h, w64(hHi[7], hLo[7]))]
+    for (let i = 0; i < 8; i++) {
+      hHi[i] = final[i].hi
+      hLo[i] = final[i].lo
+    }
+  }
+
+  let out = ''
+  for (let i = 0; i < 8; i++) {
+    out += toHex8(hHi[i]) + toHex8(hLo[i])
+  }
+  return out
+}
