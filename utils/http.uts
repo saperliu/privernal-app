@@ -79,7 +79,7 @@ export function tableTotal(res: UTSJSONObject | null): number {
 
 // ---------------- 接口路径 ----------------
 
-// F4 登录挑战签发：一次性 nonce（60 秒/单次）+ 迁移标志；服务端未配主密钥时 enabled=false
+// 登录挑战签发：一次性 nonce（60 秒/单次）+ 迁移标志；服务端未配主密钥时 enabled=false
 export function apiLoginChallenge(loginName: string, done: HttpDone) {
   http('GET', '/auth/login/challenge', {
     loginName: loginName
@@ -87,7 +87,7 @@ export function apiLoginChallenge(loginName: string, done: HttpDone) {
 }
 
 // 登录（loginType 1 = APP 端，多组织时不走 PC 的临时令牌选择流程）。
-// F4：nonceId 非空时 password 传 SHA512(nonce+线摘要)（挑战口径），否则传线摘要 SHA512(明文)
+// nonceId 非空时 password 传 SHA512(nonce+线摘要)（挑战口径），否则传线摘要 SHA512(明文)
 export function apiLogin(loginName: string, passwordValue: string, nonceId: string | null, done: HttpDone) {
   const body: UTSJSONObject = nonceId == null || nonceId.length == 0
     ? {

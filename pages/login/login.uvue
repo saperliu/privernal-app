@@ -178,7 +178,7 @@ function doLogin() {
   loading.value = true
   const wire = sha512(pwd)
 
-  // 原登录成功后的令牌落库与会话刷新（F4 挑战流程的最终回调，逻辑不变）
+  // 原登录成功后的令牌落库与会话刷新（挑战流程的最终回调，逻辑不变）
   const finishLogin = (ok: boolean, res: UTSJSONObject | null, msg: string) => {
     if (!ok) {
       loading.value = false
@@ -232,7 +232,7 @@ function doLogin() {
     })
   }
 
-  // F4 挑战-应答流程：已迁移传 SHA512(nonce+线摘要)（截获值换 nonce 即失效）；
+  // 挑战-应答流程：已迁移传 SHA512(nonce+线摘要)（截获值换 nonce 即失效）；
   // 未迁移先静默提交一次旧摘要引导服务端封存，再取新 nonce 重试；
   // 挑战关闭（服务端未配主密钥或旧版本后端）直传旧摘要走 bcrypt 口径
   apiLoginChallenge(name, (cok, cres, _cmsg) => {
